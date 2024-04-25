@@ -1,7 +1,7 @@
 """
 simple database for simulations and more (based on pandas and include CRUD)
 
-authour: hyharry@github
+author: hyharry@github
 license: MIT License
 version: 1.0
 """
