@@ -8,6 +8,7 @@ version: 1.0
 
 __doc__ = 'simple database for simulations and more (based on pandas and include CRUD)'
 
+import os
 import pandas as pd
 
 def create_csv_db(fn_csv, dic):
