@@ -40,7 +40,9 @@ def upd_cases(fn_csv, sim_cases_new_info):
         if cas not in df.index:
             print(f'{cas} not present in db (key), skip')
             continue
-        df.loc[cas, detail.keys()] = detail.values()
+        # assign each updated value to the correct column
+        for col, val in detail.items():
+            df.loc[cas, col] = val
     df.to_csv(fn_csv)
     print(f'mini sim database: {fn_csv}, updated! UPDATE {len(sim_cases_new_info)} sim cases')
 
