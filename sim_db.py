@@ -37,6 +37,9 @@ def add_case_info(fn_csv, new_info, case_val_d):
 def upd_cases(fn_csv, sim_cases_new_info):
     df = pd.read_csv(fn_csv, index_col=0)
     for cas, detail in sim_cases_new_info.items():
+        if cas not in df.index:
+            print(f'{cas} not present in db (key), skip')
+            continue
         df.loc[cas, detail.keys()] = detail.values()
     df.to_csv(fn_csv)
     print(f'mini sim database: {fn_csv}, updated! UPDATE {len(sim_cases_new_info)} sim cases')
