@@ -66,7 +66,7 @@ def list_sim_db(fn_csv):
     return df
 
 def search_sim_db(fn_csv, col_condition):
-    """ trick for filter out not nan: col_condition='col_name == col_name' """
+    """Use 'column == column' to filter out NaN values."""
     df = pd.read_csv(fn_csv, index_col=0)
     df_sel = df.query(col_condition)
     return df_sel.index
