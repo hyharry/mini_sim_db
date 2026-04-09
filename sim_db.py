@@ -3,7 +3,7 @@ simple database for simulations and more (CSV-backed CRUD)
 
 author: hyharry@github
 license: MIT License
-version: 1.1
+version: 1.2
 """
 
 __doc__ = 'simple database for simulations and more (CSV-backed CRUD)'
@@ -18,7 +18,7 @@ from typing import Any, Mapping
 
 ALLOWED_STATUS = {'start', 'restart', 'done'}
 DEFAULT_DB_PATH = os.path.expanduser('~/sim_db.csv')
-CLI_FIELDS = ['inp', 'bin', 'status', 'notes', 'created_at', 'updated_at']
+CLI_FIELDS = ['inp', 'input_files', 'bin', 'status', 'note', 'notes', 'created_at', 'updated_at']
 
 
 def _now_iso() -> str:
@@ -58,6 +58,25 @@ def _dict_table(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
         if case:
             out[case] = {k: v for k, v in row.items() if k != 'case'}
     return out
+
+
+def _serialize_input_files(input_files: list[str]) -> str:
+    return ';'.join(input_files)
+
+
+def _normalize_input_files(inp: str | None, input_files: list[str] | None) -> tuple[str, list[str]]:
+    files: list[str] = []
+    if inp:
+        files.append(inp)
+    if input_files:
+        for f in input_files:
+            if f and f not in files:
+                files.append(f)
+
+    if not files:
+        raise ValueError("At least one input file is required (use --inp and/or --input-file)")
+
+    return files[0], files
 
 
 def create_csv_db(fn_csv: str, dic: Mapping[str, Mapping[str, Any]]) -> None:
@@ -229,11 +248,13 @@ def _read_sim_db(db_path: str) -> tuple[list[str], list[dict[str, str]]]:
 
 def add_sim_item(
     case: str,
-    inp: str,
+    inp: str | None,
     bin_name: str,
     status: str,
     db_path: str = DEFAULT_DB_PATH,
     notes: str = '',
+    input_files: list[str] | None = None,
+    note: str | None = None,
 ) -> None:
     """Add one simulation item to the DB."""
     _validate_status(status)
@@ -247,14 +268,18 @@ def add_sim_item(
     if any(row.get('case', '') == case for row in rows):
         raise ValueError(f"Case '{case}' already exists in {os.path.expanduser(db_path)}")
 
+    primary_inp, files = _normalize_input_files(inp, input_files)
+    note_value = note if note is not None else notes
     now = _now_iso()
     rows.append(
         {
             'case': case,
-            'inp': inp,
+            'inp': primary_inp,
+            'input_files': _serialize_input_files(files),
             'bin': bin_name,
             'status': status,
-            'notes': notes,
+            'note': note_value,
+            'notes': note_value,
             'created_at': now,
             'updated_at': now,
         }
@@ -302,10 +327,12 @@ def _build_cli() -> argparse.ArgumentParser:
 
     p_add = sub.add_parser('add', help='Add simulation item')
     p_add.add_argument('--case', required=True, help='Case name / unique key')
-    p_add.add_argument('--inp', required=True, help='Input file or identifier')
+    p_add.add_argument('--inp', default=None, help='Primary input file (convenience for single-input cases)')
+    p_add.add_argument('--input-file', action='append', default=[], help='Input file (repeatable)')
     p_add.add_argument('--bin', dest='bin_name', required=True, help='Executable / binary name')
     p_add.add_argument('--status', required=True, help='start|restart|done')
-    p_add.add_argument('--notes', default='', help='Optional free text notes')
+    p_add.add_argument('--note', default='', help='Optional short note/documentation text')
+    p_add.add_argument('--notes', dest='note', help='Backward-compatible alias of --note')
     p_add.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to CSV database (default: ~/sim_db.csv)')
 
     p_done = sub.add_parser('done', help='Mark case status as done')
@@ -329,10 +356,11 @@ def main(argv: list[str] | None = None) -> int:
             add_sim_item(
                 case=args.case,
                 inp=args.inp,
+                input_files=args.input_file,
                 bin_name=args.bin_name,
                 status=args.status,
                 db_path=args.db,
-                notes=args.notes,
+                note=args.note,
             )
         elif args.command == 'done':
             mark_done(case=args.case, db_path=args.db)

@@ -76,14 +76,18 @@ class TestSimpleCliFunctions(unittest.TestCase):
         add_sim_item(
             case='case001',
             inp='job.inp',
+            input_files=['job.inp', 'mesh.inp'],
             bin_name='solver.bin',
             status='start',
             db_path=self.db_path,
-            notes='from test',
+            note='from test',
         )
 
         table = list_items(self.db_path)
         self.assertEqual(table['case001']['status'], 'start')
+        self.assertEqual(table['case001']['inp'], 'job.inp')
+        self.assertEqual(table['case001']['input_files'], 'job.inp;mesh.inp')
+        self.assertEqual(table['case001']['note'], 'from test')
 
         mark_done('case001', self.db_path)
         table = list_items(self.db_path)
@@ -97,6 +101,18 @@ class TestSimpleCliFunctions(unittest.TestCase):
                 inp='job.inp',
                 bin_name='solver.bin',
                 status='running',
+                db_path=self.db_path,
+            )
+
+    def test_input_required(self):
+        init_sim_db(self.db_path)
+        with self.assertRaises(ValueError):
+            add_sim_item(
+                case='case003',
+                inp=None,
+                input_files=[],
+                bin_name='solver.bin',
+                status='start',
                 db_path=self.db_path,
             )
 
@@ -142,6 +158,27 @@ class TestCliSubprocess(unittest.TestCase):
         )
         self.assertNotEqual(r_bad.returncode, 0)
         self.assertIn('Invalid status', r_bad.stderr)
+
+    def test_cli_input_files_and_note(self):
+        self.assertEqual(self._run('init').returncode, 0)
+
+        r_add = self._run(
+            'add',
+            '--case', 'c2',
+            '--inp', 'base.inp',
+            '--input-file', 'extra1.inp',
+            '--input-file', 'extra2.inp',
+            '--bin', 'solver',
+            '--status', 'start',
+            '--note', 'short note',
+        )
+        self.assertEqual(r_add.returncode, 0, msg=r_add.stderr)
+
+        r_list = self._run('list')
+        self.assertEqual(r_list.returncode, 0, msg=r_list.stderr)
+        self.assertIn("'inp': 'base.inp'", r_list.stdout)
+        self.assertIn("'input_files': 'base.inp;extra1.inp;extra2.inp'", r_list.stdout)
+        self.assertIn("'note': 'short note'", r_list.stdout)
 
 
 if __name__ == '__main__':
