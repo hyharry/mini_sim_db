@@ -1,7 +1,9 @@
+import csv
 import os
 import sys
 import tempfile
 import subprocess
+import time
 import unittest
 
 from sim_db import (
@@ -71,6 +73,10 @@ class TestSimpleCliFunctions(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
+    def _header(self):
+        with open(self.db_path, 'r', newline='', encoding='utf-8') as f:
+            return next(csv.reader(f))
+
     def test_init_add_done_list(self):
         init_sim_db(self.db_path)
         add_sim_item(
@@ -81,6 +87,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
             status='start',
             db_path=self.db_path,
             note='from test',
+            work_dir='/tmp/case001',
         )
 
         table = list_items(self.db_path)
@@ -88,10 +95,17 @@ class TestSimpleCliFunctions(unittest.TestCase):
         self.assertEqual(table['case001']['inp'], 'job.inp')
         self.assertEqual(table['case001']['input_files'], 'job.inp;mesh.inp')
         self.assertEqual(table['case001']['note'], 'from test')
+        self.assertEqual(table['case001']['work_dir'], '/tmp/case001')
+        self.assertEqual(table['case001']['state_changed_at'], table['case001']['updated_at'])
 
+        before_change = table['case001']['state_changed_at']
+        time.sleep(1)
         mark_done('case001', self.db_path)
+
         table = list_items(self.db_path)
         self.assertEqual(table['case001']['status'], 'done')
+        self.assertNotEqual(before_change, table['case001']['state_changed_at'])
+        self.assertEqual(table['case001']['state_changed_at'], table['case001']['updated_at'])
 
     def test_status_validation(self):
         init_sim_db(self.db_path)
@@ -120,6 +134,34 @@ class TestSimpleCliFunctions(unittest.TestCase):
         init_sim_db(self.db_path)
         with self.assertRaises(ValueError):
             mark_done('missing_case', self.db_path)
+
+    def test_column_order_is_stable(self):
+        init_sim_db(self.db_path)
+        add_sim_item(
+            case='case004',
+            inp='x.inp',
+            bin_name='solver.bin',
+            status='start',
+            db_path=self.db_path,
+            work_dir='/tmp/work',
+        )
+
+        self.assertEqual(
+            self._header(),
+            [
+                'case',
+                'work_dir',
+                'bin',
+                'inp',
+                'input_files',
+                'status',
+                'note',
+                'notes',
+                'state_changed_at',
+                'created_at',
+                'updated_at',
+            ],
+        )
 
 
 class TestCliSubprocess(unittest.TestCase):
@@ -159,7 +201,7 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertNotEqual(r_bad.returncode, 0)
         self.assertIn('Invalid status', r_bad.stderr)
 
-    def test_cli_input_files_and_note(self):
+    def test_cli_input_files_note_work_dir(self):
         self.assertEqual(self._run('init').returncode, 0)
 
         r_add = self._run(
@@ -169,6 +211,7 @@ class TestCliSubprocess(unittest.TestCase):
             '--input-file', 'extra1.inp',
             '--input-file', 'extra2.inp',
             '--bin', 'solver',
+            '--work-dir', '/tmp/c2',
             '--status', 'start',
             '--note', 'short note',
         )
@@ -179,6 +222,8 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertIn("'inp': 'base.inp'", r_list.stdout)
         self.assertIn("'input_files': 'base.inp;extra1.inp;extra2.inp'", r_list.stdout)
         self.assertIn("'note': 'short note'", r_list.stdout)
+        self.assertIn("'work_dir': '/tmp/c2'", r_list.stdout)
+        self.assertIn("'state_changed_at': '", r_list.stdout)
 
 
 if __name__ == '__main__':

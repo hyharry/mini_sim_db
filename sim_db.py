@@ -3,7 +3,7 @@ simple database for simulations and more (CSV-backed CRUD)
 
 author: hyharry@github
 license: MIT License
-version: 1.2
+version: 1.3
 """
 
 __doc__ = 'simple database for simulations and more (CSV-backed CRUD)'
@@ -18,11 +18,40 @@ from typing import Any, Mapping
 
 ALLOWED_STATUS = {'start', 'restart', 'done'}
 DEFAULT_DB_PATH = os.path.expanduser('~/sim_db.csv')
-CLI_FIELDS = ['inp', 'input_files', 'bin', 'status', 'note', 'notes', 'created_at', 'updated_at']
+CLI_FIELDS = [
+    'work_dir',
+    'bin',
+    'inp',
+    'input_files',
+    'status',
+    'note',
+    'notes',
+    'state_changed_at',
+    'created_at',
+    'updated_at',
+]
+PREFERRED_FIELD_ORDER = ['case', *CLI_FIELDS]
 
 
 def _now_iso() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+    return datetime.now().isoformat(timespec='milliseconds')
+
+
+def _ordered_fieldnames(fieldnames: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for field in fieldnames:
+        if field and field not in seen:
+            seen.add(field)
+            unique.append(field)
+
+    ordered: list[str] = []
+    for field in PREFERRED_FIELD_ORDER:
+        if field in seen:
+            ordered.append(field)
+
+    extras = sorted(f for f in unique if f not in set(PREFERRED_FIELD_ORDER))
+    return [*ordered, *extras]
 
 
 def _read_rows(fn_csv: str) -> tuple[list[str], list[dict[str, str]]]:
@@ -33,15 +62,16 @@ def _read_rows(fn_csv: str) -> tuple[list[str], list[dict[str, str]]]:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
         rows = [dict(row) for row in reader]
-    return fieldnames, rows
+    return _ordered_fieldnames(fieldnames), rows
 
 
 def _write_rows(fn_csv: str, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+    ordered = _ordered_fieldnames(fieldnames)
     with open(fn_csv, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=ordered)
         writer.writeheader()
         for row in rows:
-            clean = {k: row.get(k, '') for k in fieldnames}
+            clean = {k: row.get(k, '') for k in ordered}
             writer.writerow(clean)
 
 
@@ -87,7 +117,7 @@ def create_csv_db(fn_csv: str, dic: Mapping[str, Mapping[str, Any]]) -> None:
     fields = {'case'}
     for detail in dic.values():
         fields.update(detail.keys())
-    fieldnames = ['case', *sorted(f for f in fields if f != 'case')]
+    fieldnames = _ordered_fieldnames([*fields])
 
     rows: list[dict[str, str]] = []
     for case, detail in dic.items():
@@ -255,6 +285,7 @@ def add_sim_item(
     notes: str = '',
     input_files: list[str] | None = None,
     note: str | None = None,
+    work_dir: str | None = None,
 ) -> None:
     """Add one simulation item to the DB."""
     _validate_status(status)
@@ -271,15 +302,18 @@ def add_sim_item(
     primary_inp, files = _normalize_input_files(inp, input_files)
     note_value = note if note is not None else notes
     now = _now_iso()
+    resolved_work_dir = work_dir or os.getcwd()
     rows.append(
         {
             'case': case,
+            'work_dir': resolved_work_dir,
+            'bin': bin_name,
             'inp': primary_inp,
             'input_files': _serialize_input_files(files),
-            'bin': bin_name,
             'status': status,
             'note': note_value,
             'notes': note_value,
+            'state_changed_at': now,
             'created_at': now,
             'updated_at': now,
         }
@@ -294,14 +328,18 @@ def mark_done(case: str, db_path: str = DEFAULT_DB_PATH) -> None:
     fieldnames = _ensure_case_field(fieldnames)
     if 'status' not in fieldnames:
         fieldnames.append('status')
+    if 'state_changed_at' not in fieldnames:
+        fieldnames.append('state_changed_at')
     if 'updated_at' not in fieldnames:
         fieldnames.append('updated_at')
 
     found = False
+    now = _now_iso()
     for row in rows:
         if row.get('case', '') == case:
             row['status'] = 'done'
-            row['updated_at'] = _now_iso()
+            row['state_changed_at'] = now
+            row['updated_at'] = now
             found = True
             break
 
@@ -330,6 +368,7 @@ def _build_cli() -> argparse.ArgumentParser:
     p_add.add_argument('--inp', default=None, help='Primary input file (convenience for single-input cases)')
     p_add.add_argument('--input-file', action='append', default=[], help='Input file (repeatable)')
     p_add.add_argument('--bin', dest='bin_name', required=True, help='Executable / binary name')
+    p_add.add_argument('--work-dir', '--wd', dest='work_dir', default=None, help='Working directory for this case (default: current dir)')
     p_add.add_argument('--status', required=True, help='start|restart|done')
     p_add.add_argument('--note', default='', help='Optional short note/documentation text')
     p_add.add_argument('--notes', dest='note', help='Backward-compatible alias of --note')
@@ -361,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
                 status=args.status,
                 db_path=args.db,
                 note=args.note,
+                work_dir=args.work_dir,
             )
         elif args.command == 'done':
             mark_done(case=args.case, db_path=args.db)

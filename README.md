@@ -6,17 +6,23 @@ Useful for tracking simulation runs from submit scripts with a simple CLI.
 
 - Python 3
 
-## Revised behavior (v1.2)
+## Revised behavior (v1.3)
 
-- CSV DB keeps `input_files` as a first-class field again.
+- CSV DB tracks `work_dir` as a first-class field.
+- Added `state_changed_at` timestamp (ISO date+time, local time) that updates:
+  - when a case is added
+  - when status changes via `done`
+- Existing `created_at`/`updated_at` remain for compatibility.
+- CSV column order is now stable and script-friendly:
+  - `case, work_dir, bin, inp, input_files, status, note, notes, state_changed_at, created_at, updated_at`
 - CLI supports both:
   - quick single-input usage via `--inp file.inp`
   - repeatable multi-input usage via `--input-file fileA --input-file fileB`
-- `--inp` and `--input-file` can be used together. The stored fields become:
+- `--inp` and `--input-file` can be used together. Stored fields:
   - `inp`: primary input (first one)
-  - `input_files`: all inputs joined as `;` (for easy scripting)
-- Optional short note field is supported via `--note` (and legacy alias `--notes`).
-- Status validation is strict: only `start|restart|done`.
+  - `input_files`: all inputs joined as `;`
+- Optional short note field is supported via `--note` (legacy alias `--notes`).
+- Status validation remains strict: only `start|restart|done`.
 - Default DB path remains `~/sim_db.csv`.
 - CRUD-style helper functions remain available in `sim_db.py` (`create_csv_db`, `add_cases`, `upd_cases`, `del_cases`, etc.).
 
@@ -45,6 +51,7 @@ Single-input convenience:
 ```bash
 python sim_db.py add \
   --case case_001 \
+  --work-dir "$PWD" \
   --inp model_001.inp \
   --bin solver_v2 \
   --status start
@@ -55,6 +62,7 @@ Multi-input (repeatable) usage:
 ```bash
 python sim_db.py add \
   --case case_002 \
+  --work-dir /scratch/project/case_002 \
   --input-file model_002.inp \
   --input-file mesh_002.inp \
   --bin solver_v2 \
@@ -66,6 +74,7 @@ With optional note and custom DB path:
 ```bash
 python sim_db.py add \
   --case case_003 \
+  --work-dir ./runs/case_003 \
   --inp model_003.inp \
   --input-file bc_003.inp \
   --bin solver_v2 \
@@ -74,11 +83,15 @@ python sim_db.py add \
   --db ./sim_db.csv
 ```
 
+If `--work-dir` is not provided, the CLI stores the current working directory.
+
 ### Mark a case as done
 
 ```bash
 python sim_db.py done --case case_001
 ```
+
+This updates both `status=done` and `state_changed_at`.
 
 ### List DB content
 
@@ -102,6 +115,7 @@ DB="${DB:-$HOME/sim_db.csv}"
 python /path/to/mini_sim_db/sim_db.py init --db "$DB"
 python /path/to/mini_sim_db/sim_db.py add \
   --case "$CASE" \
+  --work-dir "$PWD" \
   --inp "$INP" \
   --bin "$BIN" \
   --status start \
@@ -110,20 +124,6 @@ python /path/to/mini_sim_db/sim_db.py add \
 # preproc and submit
 ./preproc "$INP"
 ./submit "$CASE"
-```
-
-With multiple input files:
-
-```bash
-python /path/to/mini_sim_db/sim_db.py add \
-  --case "$CASE" \
-  --inp "$CASE.inp" \
-  --input-file "$CASE.mesh" \
-  --input-file "$CASE.bc" \
-  --bin "$BIN" \
-  --status restart \
-  --note "rerun with new boundary settings" \
-  --db "$DB"
 ```
 
 After post-processing:
