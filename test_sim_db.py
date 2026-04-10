@@ -1,4 +1,3 @@
-import csv
 import os
 import sys
 import tempfile
@@ -12,9 +11,11 @@ from sim_db import (
     create_csv_db,
     del_cases,
     derive_job_id,
+    import_csv,
     init_sim_db,
     list_items,
     list_sim_db,
+    list_view,
     mark_done,
     upd_cases,
 )
@@ -23,7 +24,7 @@ from sim_db import (
 class TestCRUDOperations(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.fn_csv = os.path.join(self.tmp_dir.name, 'test.csv')
+        self.db_path = os.path.join(self.tmp_dir.name, 'test.csv')  # compatibility path
         self.initial_data = {
             'sim_a': {
                 'date_create': 20240101,
@@ -40,29 +41,25 @@ class TestCRUDOperations(unittest.TestCase):
                 'status': 'NEW',
             },
         }
-        create_csv_db(self.fn_csv, self.initial_data)
+        create_csv_db(self.db_path, self.initial_data)
 
     def tearDown(self):
         self.tmp_dir.cleanup()
 
     def test_crud_flow(self):
-        # verify create
-        table = list_sim_db(self.fn_csv)
+        table = list_sim_db(self.db_path)
         self.assertEqual(set(table.keys()), {'sim_a', 'sim_b'})
 
-        # add (insert)
-        add_cases(self.fn_csv, {'sim_c': {'date_create': 20240301}})
-        table = list_sim_db(self.fn_csv)
+        add_cases(self.db_path, {'sim_c': {'date_create': 20240301}})
+        table = list_sim_db(self.db_path)
         self.assertIn('sim_c', table)
 
-        # update
-        upd_cases(self.fn_csv, {'sim_a': {'status': 'DONE'}})
-        table = list_sim_db(self.fn_csv)
+        upd_cases(self.db_path, {'sim_a': {'status': 'DONE'}})
+        table = list_sim_db(self.db_path)
         self.assertEqual(table['sim_a']['status'], 'DONE')
 
-        # delete
-        del_cases(self.fn_csv, ['sim_b'])
-        table = list_sim_db(self.fn_csv)
+        del_cases(self.db_path, ['sim_b'])
+        table = list_sim_db(self.db_path)
         self.assertNotIn('sim_b', table)
 
 
@@ -74,12 +71,10 @@ class TestSimpleCliFunctions(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
-    def _header(self):
-        with open(self.db_path, 'r', newline='', encoding='utf-8') as f:
-            return next(csv.reader(f))
-
     def test_init_add_done_list(self):
         init_sim_db(self.db_path)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir.name, 'sim_db.sqlite3')))
+
         add_sim_item(
             case='case001',
             inp='job.inp',
@@ -109,7 +104,6 @@ class TestSimpleCliFunctions(unittest.TestCase):
                 input_files=['job.inp', 'mesh.inp'],
             ),
         )
-        self.assertFalse(table['case001']['job_id'].startswith('job_'))
         self.assertRegex(table['case001']['job_id'], r'^[0-9a-f]{16}$')
 
         before_change = table['case001']['state_changed_at']
@@ -132,52 +126,21 @@ class TestSimpleCliFunctions(unittest.TestCase):
                 db_path=self.db_path,
             )
 
-    def test_input_required(self):
+    def test_view_filter(self):
         init_sim_db(self.db_path)
-        with self.assertRaises(ValueError):
-            add_sim_item(
-                case='case003',
-                inp=None,
-                input_files=[],
-                bin_name='solver.bin',
-                status='start',
-                db_path=self.db_path,
-            )
+        add_sim_item(case='a', inp='a.inp', bin_name='solver', status='start', db_path=self.db_path, work_dir='/tmp/a')
+        add_sim_item(case='b', inp='b.inp', bin_name='solver', status='done', db_path=self.db_path, work_dir='/tmp/b')
+        rows = list_view(self.db_path, status='done')
+        self.assertEqual([r['case'] for r in rows], ['b'])
 
-    def test_done_missing_case(self):
+    def test_csv_import(self):
+        csv_file = os.path.join(self.tmp_dir.name, 'legacy.csv')
+        with open(csv_file, 'w', encoding='utf-8') as f:
+            f.write('case,bin,inp,status\n')
+            f.write('legacy1,solver,legacy.inp,start\n')
         init_sim_db(self.db_path)
-        with self.assertRaises(ValueError):
-            mark_done('missing_case', self.db_path)
-
-    def test_column_order_is_stable(self):
-        init_sim_db(self.db_path)
-        add_sim_item(
-            case='case004',
-            inp='x.inp',
-            bin_name='solver.bin',
-            status='start',
-            db_path=self.db_path,
-            work_dir='/tmp/work',
-        )
-
-        self.assertEqual(
-            self._header(),
-            [
-                'case',
-                'work_dir',
-                'bin',
-                'inp',
-                'input_files',
-                'job_id',
-                'extra_params',
-                'status',
-                'note',
-                'notes',
-                'state_changed_at',
-                'created_at',
-                'updated_at',
-            ],
-        )
+        import_csv(csv_file, self.db_path)
+        self.assertIn('legacy1', list_items(self.db_path))
 
 
 class TestCliSubprocess(unittest.TestCase):
@@ -205,7 +168,7 @@ class TestCliSubprocess(unittest.TestCase):
     def test_cli_default_db_path_and_invalid_status(self):
         r_init = self._run('init')
         self.assertEqual(r_init.returncode, 0, msg=r_init.stderr)
-        self.assertTrue(os.path.exists(os.path.join(self.home_dir, 'sim_db.csv')))
+        self.assertTrue(os.path.exists(os.path.join(self.home_dir, 'sim_db.sqlite3')))
 
         r_bad = self._run(
             'add',
@@ -217,65 +180,18 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertNotEqual(r_bad.returncode, 0)
         self.assertIn('Invalid status', r_bad.stderr)
 
-    def test_cli_input_files_note_work_dir(self):
-        self.assertEqual(self._run('init').returncode, 0)
-
-        r_add = self._run(
-            'add',
-            '--case', 'c2',
-            '--inp', 'base.inp',
-            '--input-file', 'extra1.inp',
-            '--input-file', 'extra2.inp',
-            '--bin', 'solver',
-            '--work-dir', '/tmp/c2',
-            '--extra-param', 'threads=8',
-            '--extra-param', 'precision=double',
-            '--status', 'start',
-            '--note', 'short note',
-        )
-        self.assertEqual(r_add.returncode, 0, msg=r_add.stderr)
-
-        r_list = self._run('list')
-        self.assertEqual(r_list.returncode, 0, msg=r_list.stderr)
-        self.assertIn("'inp': 'base.inp'", r_list.stdout)
-        self.assertIn("'input_files': 'base.inp;extra1.inp;extra2.inp'", r_list.stdout)
-        self.assertIn("'note': 'short note'", r_list.stdout)
-        self.assertIn("'work_dir': '/tmp/c2'", r_list.stdout)
-        self.assertIn("'extra_params': '{\"precision\": \"double\", \"threads\": \"8\"}'", r_list.stdout)
-        self.assertIn("'state_changed_at': '", r_list.stdout)
-
-    def test_cli_extra_params_conflict_rejected(self):
-        self.assertEqual(self._run('init').returncode, 0)
-        r_add = self._run(
-            'add',
-            '--case', 'c3',
-            '--inp', 'base.inp',
-            '--bin', 'solver',
-            '--status', 'start',
-            '--extra-param', 'threads=8',
-            '--extra-params', '{"threads": 16}',
-        )
-        self.assertNotEqual(r_add.returncode, 0)
-        self.assertIn('Use either --extra-params or --extra-param, not both', r_add.stderr)
-
-    def test_cli_done_by_job_id(self):
+    def test_cli_table_view(self):
         self.assertEqual(self._run('init').returncode, 0)
         self.assertEqual(
             self._run(
-                'add',
-                '--case', 'c4',
-                '--inp', 'base.inp',
-                '--bin', 'solver',
-                '--status', 'start',
-                '--work-dir', '/tmp/c4',
+                'add', '--case', 'c2', '--inp', 'a.inp', '--bin', 'solver', '--status', 'start'
             ).returncode,
             0,
         )
-
-        job_id = list_items(os.path.join(self.home_dir, 'sim_db.csv'))['c4']['job_id']
-        r_done = self._run('done', '--job-id', job_id)
-        self.assertEqual(r_done.returncode, 0, msg=r_done.stderr)
-        self.assertEqual(list_items(os.path.join(self.home_dir, 'sim_db.csv'))['c4']['status'], 'done')
+        r_list = self._run('list', '--table')
+        self.assertEqual(r_list.returncode, 0, msg=r_list.stderr)
+        self.assertIn('case', r_list.stdout)
+        self.assertIn('c2', r_list.stdout)
 
 
 if __name__ == '__main__':

@@ -157,6 +157,27 @@ class SimDbClient:
             path += "?" + parse.urlencode({"db_path": db_path})
         return self._request("GET", path)
 
+    def summary(
+        self,
+        *,
+        db_path: str | None = None,
+        status: str | None = None,
+        run_host: str | None = None,
+        limit: int | None = None,
+        sort_by: str = "updated_at",
+        order: str = "desc",
+    ) -> dict[str, Any]:
+        query: dict[str, Any] = {"sort_by": sort_by, "order": order}
+        if db_path:
+            query["db_path"] = db_path
+        if status:
+            query["status"] = status
+        if run_host:
+            query["run_host"] = run_host
+        if limit is not None:
+            query["limit"] = limit
+        return self._request("GET", "/cases/summary?" + parse.urlencode(query))
+
     def _dual_write(self, op: str, payload: dict[str, Any]) -> dict[str, Any]:
         local_ok = None
         local_error = None
@@ -301,8 +322,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token", default=None, help="Bearer token (or SIM_DB_API_TOKEN)")
     p.add_argument(
         "--local-db",
-        default=os.path.expanduser("~/.sim_db_client_local.csv"),
-        help="Local durable mirror DB for dual-write fallback (default: ~/.sim_db_client_local.csv)",
+        default=os.path.expanduser("~/.sim_db_client_local.sqlite3"),
+        help="Local durable mirror DB for dual-write fallback (default: ~/.sim_db_client_local.sqlite3)",
     )
     p.add_argument("--no-local-write", action="store_true", help="Disable local dual-write fallback")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -345,6 +366,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_list = sub.add_parser("list")
     p_list.add_argument("--db", default=None)
+
+    p_summary = sub.add_parser("summary")
+    p_summary.add_argument("--db", default=None)
+    p_summary.add_argument("--status", default=None)
+    p_summary.add_argument("--run-host", default=None)
+    p_summary.add_argument("--limit", type=int, default=None)
+    p_summary.add_argument("--sort-by", default="updated_at")
+    p_summary.add_argument("--order", choices=["asc", "desc"], default="desc")
 
     return p
 
@@ -390,6 +419,15 @@ def main(argv: list[str] | None = None) -> int:
             result = client.delete(case=args.case, job_id=args.job_id, db_path=args.db)
         elif args.cmd == "list":
             result = client.list(db_path=args.db)
+        elif args.cmd == "summary":
+            result = client.summary(
+                db_path=args.db,
+                status=args.status,
+                run_host=args.run_host,
+                limit=args.limit,
+                sort_by=args.sort_by,
+                order=args.order,
+            )
         else:
             return 1
     except (RuntimeError, ValueError) as exc:

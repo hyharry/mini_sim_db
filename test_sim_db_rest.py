@@ -15,9 +15,9 @@ from sim_db_server import SecurityPolicy, SimDbApiServer
 class RestServerTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.db_default = os.path.join(self.tmp.name, "default.csv")
-        self.db_other = os.path.join(self.tmp.name, "other.csv")
-        self.local_db = os.path.join(self.tmp.name, "local.csv")
+        self.db_default = os.path.join(self.tmp.name, "default.sqlite3")
+        self.db_other = os.path.join(self.tmp.name, "other.sqlite3")
+        self.local_db = os.path.join(self.tmp.name, "local.sqlite3")
         self.token = "test-token"
 
     def tearDown(self):
@@ -324,6 +324,22 @@ class RestServerTestCase(unittest.TestCase):
             self.assertEqual(second["case"], "c1")
             self.assertEqual(second["item"]["note"], "by job id")
             self.assertEqual(second["item"]["status"], "restart")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_summary_endpoint(self):
+        server, thread, url = self._start_server()
+        try:
+            client = SimDbClient(base_url=url, token=self.token, local_db_path=self.local_db)
+            client.init()
+            client.create(case="c1", inp="a.inp", bin_name="solver", status="start")
+            client.create(case="c2", inp="b.inp", bin_name="solver", status="done")
+
+            out = client.summary(status="done", limit=5)
+            self.assertEqual(out["count"], 1)
+            self.assertEqual(out["items"][0]["case"], "c2")
         finally:
             server.shutdown()
             server.server_close()
