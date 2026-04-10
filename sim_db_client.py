@@ -193,6 +193,9 @@ class SimDbClient:
         run_host = payload.get("run_host")
 
         if op == "create":
+            if payload.get("job_id") not in (None, ""):
+                raise ValueError("field 'job_id' is auto-generated and cannot be set on create")
+
             case = payload["case"]
             add_sim_item(
                 case=case,

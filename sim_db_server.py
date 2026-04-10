@@ -227,6 +227,9 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
 
     def _create_case(self, payload: dict[str, Any]) -> None:
         try:
+            if payload.get("job_id") not in (None, ""):
+                raise ValueError("field 'job_id' is auto-generated and cannot be set on create")
+
             db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
             with self.server.mutation_lock:
                 add_sim_item(

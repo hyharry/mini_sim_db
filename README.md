@@ -35,7 +35,7 @@ python sim_db.py list
 Notes:
 - allowed status values: `start`, `restart`, `done`
 - if `--work-dir` is omitted, current working directory is stored
-- each row also stores a deterministic `job_id` derived from `case + work_dir + inp + input_files`
+- each row also stores a deterministic `job_id` (16-char hash, no prefix) derived from `case + work_dir + inp + input_files`
 - `done` supports `--case` or `--job-id`
 
 ## Quick start (REST)
@@ -54,7 +54,7 @@ python sim_db_client.py --url http://127.0.0.1:8765 create \
 python sim_db_client.py --url http://127.0.0.1:8765 done --case c100
 python sim_db_client.py --url http://127.0.0.1:8765 list
 # follow-up by stable job id is also supported for read/update/done/delete
-# python sim_db_client.py ... read --job-id job_xxx
+# python sim_db_client.py ... read --job-id <16-char-hash>
 ```
 
 ## Tests

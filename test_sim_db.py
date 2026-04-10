@@ -109,6 +109,8 @@ class TestSimpleCliFunctions(unittest.TestCase):
                 input_files=['job.inp', 'mesh.inp'],
             ),
         )
+        self.assertFalse(table['case001']['job_id'].startswith('job_'))
+        self.assertRegex(table['case001']['job_id'], r'^[0-9a-f]{16}$')
 
         before_change = table['case001']['state_changed_at']
         time.sleep(1)

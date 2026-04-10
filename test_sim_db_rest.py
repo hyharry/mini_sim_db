@@ -288,6 +288,28 @@ class RestServerTestCase(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_create_rejects_user_supplied_job_id(self):
+        server, thread, url = self._start_server()
+        try:
+            client = SimDbClient(base_url=url, token=self.token, local_db_path=self.local_db)
+            client.init()
+            with self.assertRaisesRegex(RuntimeError, "auto-generated"):
+                client._request(
+                    "POST",
+                    "/cases",
+                    {
+                        "case": "c-bad",
+                        "inp": "a.inp",
+                        "bin_name": "solver",
+                        "status": "start",
+                        "job_id": "manual-id",
+                    },
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_job_id_can_be_used_for_follow_up_updates(self):
         server, thread, url = self._start_server()
         try:

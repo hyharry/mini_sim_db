@@ -122,8 +122,7 @@ def derive_job_id(
         payload['input_files'] = [str(path) for path in input_files if str(path)]
 
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
-    digest = hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]
-    return f'job_{digest}'
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]
 
 
 def _ensure_row_job_id(row: dict[str, str]) -> str:
