@@ -1,6 +1,6 @@
 """HTTP host for mini_sim_db.
 
-Small stdlib-only JSON API around sim_db.py for centralized case updates.
+Stdlib-only JSON API around sim_db.py for centralized CRUD updates.
 """
 
 from __future__ import annotations
@@ -8,13 +8,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from sim_db import DEFAULT_DB_PATH, add_sim_item, init_sim_db, list_items, mark_done
+from sim_db import (
+    ALLOWED_STATUS,
+    DEFAULT_DB_PATH,
+    add_sim_item,
+    del_cases,
+    init_sim_db,
+    list_items,
+    mark_done,
+    upd_cases,
+)
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="milliseconds")
 
 
 class SecurityPolicy:
@@ -43,7 +57,6 @@ class SecurityPolicy:
 
         wanted = _norm(requested_db_path)
 
-        # safest default: only configured default DB path is writable
         if self.allowed_db_path is None and self.allowed_base_dir is None:
             if wanted == self.default_db_path:
                 return wanted
@@ -76,24 +89,61 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
             self._require_auth()
             if not self._authorized:
                 return
+
             query = self._query_dict()
-            db_path = query.get("db_path")
             try:
-                resolved = self.server.policy.resolve_db_path(db_path)
-                data = list_items(resolved)
-            except Exception as exc:  # user-facing API error
+                db_path = self.server.policy.resolve_db_path(query.get("db_path"))
+                case = self._case_from_path()
+                data = list_items(db_path)
+                if case:
+                    if case not in data:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": f"case not found: {case}"})
+                        return
+                    self._json(HTTPStatus.OK, {"db_path": db_path, "case": case, "item": data[case]})
+                    return
+                self._json(HTTPStatus.OK, {"db_path": db_path, "cases": data})
+            except Exception as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-                return
-            self._json(HTTPStatus.OK, {"db_path": resolved, "cases": data})
             return
 
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path not in {"/init", "/add", "/done"}:
-            self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        if self.path == "/init":
+            self._require_auth()
+            if not self._authorized:
+                return
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            try:
+                db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
+                init_sim_db(db_path)
+                self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path})
+            except Exception as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
+        if self.path in {"/add", "/done", "/update", "/delete"}:
+            self._legacy_mutating_routes()
+            return
+
+        if self.path == "/cases":
+            self._require_auth()
+            if not self._authorized:
+                return
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            self._create_case(payload)
+            return
+
+        self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        if not self.path.startswith("/cases/"):
+            self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
         self._require_auth()
         if not self._authorized:
             return
@@ -102,41 +152,119 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
         if payload is None:
             return
 
-        req_db_path = payload.get("db_path") if isinstance(payload, dict) else None
-        try:
-            db_path = self.server.policy.resolve_db_path(req_db_path)
-        except Exception as exc:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        case = self._case_from_path()
+        if not case:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "missing case in path"})
             return
 
+        self._update_case(case, payload)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if not self.path.startswith("/cases/"):
+            self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+        self._require_auth()
+        if not self._authorized:
+            return
+
+        case = self._case_from_path()
+        if not case:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "missing case in path"})
+            return
+
+        query = self._query_dict()
+        req_db = query.get("db_path")
         try:
-            if self.path == "/init":
-                init_sim_db(db_path)
-                self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path})
-                return
+            db_path = self.server.policy.resolve_db_path(req_db)
+            del_cases(db_path, [case])
+            self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case})
+        except Exception as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
-            if self.path == "/add":
-                add_sim_item(
-                    case=payload["case"],
-                    inp=payload.get("inp"),
-                    input_files=payload.get("input_files"),
-                    bin_name=payload["bin_name"],
-                    status=payload["status"],
-                    db_path=db_path,
-                    note=payload.get("note"),
-                    work_dir=payload.get("work_dir"),
-                )
-                self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": payload["case"]})
-                return
+    def _legacy_mutating_routes(self) -> None:
+        self._require_auth()
+        if not self._authorized:
+            return
+        payload = self._read_json_body()
+        if payload is None:
+            return
 
-            if self.path == "/done":
-                mark_done(case=payload["case"], db_path=db_path)
-                self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": payload["case"]})
+        if self.path == "/add":
+            self._create_case(payload)
+            return
+        if self.path == "/done":
+            case = payload.get("case")
+            if not case:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case"})
                 return
+            self._update_case(case, {"fields": {"status": "done"}, **payload})
+            return
+        if self.path == "/update":
+            case = payload.get("case")
+            if not case:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case"})
+                return
+            self._update_case(case, payload)
+            return
+        if self.path == "/delete":
+            case = payload.get("case")
+            if not case:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case"})
+                return
+            try:
+                db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
+                del_cases(db_path, [case])
+                self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case})
+            except Exception as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
+    def _create_case(self, payload: dict[str, Any]) -> None:
+        try:
+            db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
+            add_sim_item(
+                case=payload["case"],
+                inp=payload.get("inp"),
+                input_files=payload.get("input_files"),
+                bin_name=payload["bin_name"],
+                status=payload["status"],
+                db_path=db_path,
+                note=payload.get("note"),
+                work_dir=payload.get("work_dir"),
+            )
+            run_host = payload.get("run_host")
+            if run_host:
+                upd_cases(db_path, {payload["case"]: {"run_host": str(run_host)}})
+            self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": payload["case"]})
         except KeyError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
-        except (ValueError, FileNotFoundError) as exc:
+        except Exception as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _update_case(self, case: str, payload: dict[str, Any]) -> None:
+        try:
+            db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
+            fields = payload.get("fields")
+            if fields is None:
+                fields = {k: v for k, v in payload.items() if k not in {"case", "db_path", "run_host"}}
+            if not isinstance(fields, dict) or not fields:
+                raise ValueError("fields must be a non-empty object")
+
+            status = fields.get("status")
+            if status is not None:
+                if status not in ALLOWED_STATUS:
+                    allowed = ", ".join(sorted(ALLOWED_STATUS))
+                    raise ValueError(f"Invalid status '{status}'. Allowed: {allowed}")
+                fields["state_changed_at"] = _now_iso()
+
+            fields["updated_at"] = _now_iso()
+
+            run_host = payload.get("run_host")
+            if run_host:
+                fields["run_host"] = str(run_host)
+
+            upd_cases(db_path, {case: fields})
+            self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case, "updated": sorted(fields.keys())})
+        except Exception as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -161,6 +289,13 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
             if vals:
                 out[k] = vals[0]
         return out
+
+    def _case_from_path(self) -> str | None:
+        path = urlsplit(self.path).path
+        parts = [p for p in path.split("/") if p]
+        if len(parts) >= 2 and parts[0] == "cases":
+            return parts[1]
+        return None
 
     def _require_auth(self) -> None:
         self._authorized = self.server.policy.is_authorized(self.headers.get("Authorization"))

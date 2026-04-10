@@ -137,12 +137,21 @@ DB="${DB:-$HOME/sim_db.csv}"
 python /path/to/mini_sim_db/sim_db.py done --case "$CASE" --db "$DB"
 ```
 
-## REST host + client (centralized writes)
+## REST host + client (centralized writes + local durability)
 
-New modules (without touching `sim_db.py`):
+Modules:
 
-- `sim_db_server.py` — tiny stdlib HTTP JSON server
-- `sim_db_client.py` — tiny stdlib client + CLI
+- `sim_db_server.py` — stdlib HTTP JSON API host
+- `sim_db_client.py` — stdlib client + CLI with dual-write fallback
+
+Design notes:
+
+- REST layer reuses existing `sim_db.py` helpers (`init_sim_db`, `add_sim_item`, `upd_cases`, `del_cases`, `list_items`, `mark_done`) instead of duplicating CSV logic.
+- `run_host` is auto-populated by client mutating operations (`create`, `update`, `done`, `delete`) using local hostname and stored as a DB column.
+- Mutating client operations are **dual-write** by default:
+  1. write to local durable mirror DB (default: `~/.sim_db_client_local.csv`)
+  2. try remote write
+  3. if remote is down, command still succeeds with `fallback: local-only`
 
 Security defaults:
 
@@ -152,49 +161,75 @@ Security defaults:
   - `--allowed-db-path /exact/path.csv`
   - `--allowed-base-dir /safe/base/dir`
 
-Start server (local host, Linux/macOS):
+### REST CRUD API
+
+- `POST /cases` → create
+- `GET /cases` → read all
+- `GET /cases/<case>` → read one
+- `PATCH /cases/<case>` → update selected fields
+- `DELETE /cases/<case>` → delete
+
+Compatibility routes still exist: `/add`, `/done`, `/update`, `/delete`, `/init`.
+
+### Start server
+
+Linux/macOS:
 
 ```bash
 export SIM_DB_API_TOKEN='replace-me'
 python sim_db_server.py --host 127.0.0.1 --port 8765 --db ~/sim_db.csv
 ```
 
-Start server (Windows PowerShell):
+Windows PowerShell:
 
 ```powershell
 $env:SIM_DB_API_TOKEN = 'replace-me'
 python .\sim_db_server.py --host 127.0.0.1 --port 8765 --db $HOME\sim_db.csv
 ```
 
-Client examples (Linux/macOS):
+### Client usage (CRUD)
+
+Linux/macOS:
 
 ```bash
 export SIM_DB_API_TOKEN='replace-me'
 python sim_db_client.py --url http://127.0.0.1:8765 health
 python sim_db_client.py --url http://127.0.0.1:8765 init
-python sim_db_client.py --url http://127.0.0.1:8765 add \
+python sim_db_client.py --url http://127.0.0.1:8765 create \
   --case c100 --inp c100.inp --bin solver --status start --work-dir /work/c100
+python sim_db_client.py --url http://127.0.0.1:8765 read --case c100
+python sim_db_client.py --url http://127.0.0.1:8765 update --case c100 --field status=restart --field note='retry'
 python sim_db_client.py --url http://127.0.0.1:8765 done --case c100
+python sim_db_client.py --url http://127.0.0.1:8765 delete --case c100
 python sim_db_client.py --url http://127.0.0.1:8765 list
 ```
 
-Client examples (Windows PowerShell):
+Windows PowerShell:
 
 ```powershell
 $env:SIM_DB_API_TOKEN = 'replace-me'
 python .\sim_db_client.py --url http://127.0.0.1:8765 health
 python .\sim_db_client.py --url http://127.0.0.1:8765 init
-python .\sim_db_client.py --url http://127.0.0.1:8765 add `
+python .\sim_db_client.py --url http://127.0.0.1:8765 create `
   --case c100 --inp c100.inp --bin solver --status start --work-dir C:\work\c100
+python .\sim_db_client.py --url http://127.0.0.1:8765 read --case c100
+python .\sim_db_client.py --url http://127.0.0.1:8765 update --case c100 --field status=restart --field note='retry'
 python .\sim_db_client.py --url http://127.0.0.1:8765 done --case c100
+python .\sim_db_client.py --url http://127.0.0.1:8765 delete --case c100
 python .\sim_db_client.py --url http://127.0.0.1:8765 list
 ```
 
+Dual-write options:
+
+- default local mirror DB: `~/.sim_db_client_local.csv`
+- override: `--local-db /path/to/local.csv`
+- disable local write: `--no-local-write`
+
 Windows notes:
 
-- Server/client code now uses `pathlib.Path.resolve()` for path normalization and allowlist checks, so Windows drive-letter paths are handled more safely than plain string-prefix checks.
-- If the server runs on a different Windows machine, bind to a reachable host/IP and open the firewall only for trusted sources.
-- Keep the Bearer token in an environment variable rather than hardcoding it into scripts.
+- Path safety uses `pathlib.Path.resolve()` for allowlist checks.
+- If server runs remotely, bind host/IP intentionally and restrict firewall rules.
+- Keep token in environment variables instead of hardcoding in scripts.
 
 ## Tests
 
