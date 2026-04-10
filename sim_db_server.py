@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -176,15 +177,17 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
 
 
 def _norm(path: str) -> str:
-    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    return str(Path(path).expanduser().resolve())
 
 
 def _is_within_base(path: str, base_dir: str) -> bool:
+    target = Path(path).expanduser().resolve()
+    base = Path(base_dir).expanduser().resolve()
     try:
-        common = os.path.commonpath([path, base_dir])
+        target.relative_to(base)
+        return True
     except ValueError:
         return False
-    return common == base_dir
 
 
 def _build_parser() -> argparse.ArgumentParser:

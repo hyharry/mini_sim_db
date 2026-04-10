@@ -152,14 +152,21 @@ Security defaults:
   - `--allowed-db-path /exact/path.csv`
   - `--allowed-base-dir /safe/base/dir`
 
-Start server (local host):
+Start server (local host, Linux/macOS):
 
 ```bash
 export SIM_DB_API_TOKEN='replace-me'
 python sim_db_server.py --host 127.0.0.1 --port 8765 --db ~/sim_db.csv
 ```
 
-Client examples:
+Start server (Windows PowerShell):
+
+```powershell
+$env:SIM_DB_API_TOKEN = 'replace-me'
+python .\sim_db_server.py --host 127.0.0.1 --port 8765 --db $HOME\sim_db.csv
+```
+
+Client examples (Linux/macOS):
 
 ```bash
 export SIM_DB_API_TOKEN='replace-me'
@@ -170,6 +177,24 @@ python sim_db_client.py --url http://127.0.0.1:8765 add \
 python sim_db_client.py --url http://127.0.0.1:8765 done --case c100
 python sim_db_client.py --url http://127.0.0.1:8765 list
 ```
+
+Client examples (Windows PowerShell):
+
+```powershell
+$env:SIM_DB_API_TOKEN = 'replace-me'
+python .\sim_db_client.py --url http://127.0.0.1:8765 health
+python .\sim_db_client.py --url http://127.0.0.1:8765 init
+python .\sim_db_client.py --url http://127.0.0.1:8765 add `
+  --case c100 --inp c100.inp --bin solver --status start --work-dir C:\work\c100
+python .\sim_db_client.py --url http://127.0.0.1:8765 done --case c100
+python .\sim_db_client.py --url http://127.0.0.1:8765 list
+```
+
+Windows notes:
+
+- Server/client code now uses `pathlib.Path.resolve()` for path normalization and allowlist checks, so Windows drive-letter paths are handled more safely than plain string-prefix checks.
+- If the server runs on a different Windows machine, bind to a reachable host/IP and open the firewall only for trusted sources.
+- Keep the Bearer token in an environment variable rather than hardcoding it into scripts.
 
 ## Tests
 
