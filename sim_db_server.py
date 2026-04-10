@@ -230,6 +230,7 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
                 db_path=db_path,
                 note=payload.get("note"),
                 work_dir=payload.get("work_dir"),
+                extra_params=payload.get("extra_params"),
             )
             run_host = payload.get("run_host")
             if run_host:

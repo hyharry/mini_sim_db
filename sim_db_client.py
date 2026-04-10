@@ -47,6 +47,7 @@ class SimDbClient:
         input_files: list[str] | None = None,
         note: str | None = None,
         work_dir: str | None = None,
+        extra_params: str | None = None,
         db_path: str | None = None,
         run_host: str | None = None,
     ) -> dict[str, Any]:
@@ -64,6 +65,8 @@ class SimDbClient:
             payload["note"] = note
         if work_dir is not None:
             payload["work_dir"] = work_dir
+        if extra_params is not None:
+            payload["extra_params"] = extra_params
         if db_path is not None:
             payload["db_path"] = db_path
         return self._dual_write("create", payload)
@@ -163,6 +166,7 @@ class SimDbClient:
                 db_path=self.local_db_path,
                 note=payload.get("note"),
                 work_dir=payload.get("work_dir"),
+                extra_params=payload.get("extra_params"),
             )
             if run_host:
                 upd_cases(self.local_db_path, {case: {"run_host": str(run_host)}})
@@ -243,6 +247,7 @@ def _add_create_like_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input-file", action="append", default=None)
     parser.add_argument("--note", default=None)
     parser.add_argument("--work-dir", default=None)
+    parser.add_argument("--extra-params", default=None, help="Raw extra runtime params string (for example JSON)")
     parser.add_argument("--db", default=None)
 
 
@@ -320,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                 status=args.status,
                 note=args.note,
                 work_dir=args.work_dir,
+                extra_params=args.extra_params,
                 db_path=args.db,
             )
         elif args.cmd == "read":

@@ -88,6 +88,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
             db_path=self.db_path,
             note='from test',
             work_dir='/tmp/case001',
+            extra_params='{"alpha": 1, "beta": "x"}',
         )
 
         table = list_items(self.db_path)
@@ -96,6 +97,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
         self.assertEqual(table['case001']['input_files'], 'job.inp;mesh.inp')
         self.assertEqual(table['case001']['note'], 'from test')
         self.assertEqual(table['case001']['work_dir'], '/tmp/case001')
+        self.assertEqual(table['case001']['extra_params'], '{"alpha": 1, "beta": "x"}')
         self.assertEqual(table['case001']['state_changed_at'], table['case001']['updated_at'])
 
         before_change = table['case001']['state_changed_at']
@@ -154,6 +156,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
                 'bin',
                 'inp',
                 'input_files',
+                'extra_params',
                 'status',
                 'note',
                 'notes',
@@ -212,6 +215,8 @@ class TestCliSubprocess(unittest.TestCase):
             '--input-file', 'extra2.inp',
             '--bin', 'solver',
             '--work-dir', '/tmp/c2',
+            '--extra-param', 'threads=8',
+            '--extra-param', 'precision=double',
             '--status', 'start',
             '--note', 'short note',
         )
@@ -223,7 +228,22 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertIn("'input_files': 'base.inp;extra1.inp;extra2.inp'", r_list.stdout)
         self.assertIn("'note': 'short note'", r_list.stdout)
         self.assertIn("'work_dir': '/tmp/c2'", r_list.stdout)
+        self.assertIn("'extra_params': '{\"precision\": \"double\", \"threads\": \"8\"}'", r_list.stdout)
         self.assertIn("'state_changed_at': '", r_list.stdout)
+
+    def test_cli_extra_params_conflict_rejected(self):
+        self.assertEqual(self._run('init').returncode, 0)
+        r_add = self._run(
+            'add',
+            '--case', 'c3',
+            '--inp', 'base.inp',
+            '--bin', 'solver',
+            '--status', 'start',
+            '--extra-param', 'threads=8',
+            '--extra-params', '{"threads": 16}',
+        )
+        self.assertNotEqual(r_add.returncode, 0)
+        self.assertIn('Use either --extra-params or --extra-param, not both', r_add.stderr)
 
 
 if __name__ == '__main__':

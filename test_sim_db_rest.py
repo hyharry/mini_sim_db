@@ -51,6 +51,7 @@ class RestServerTestCase(unittest.TestCase):
                 status="start",
                 note="remote submit",
                 work_dir="/work/c1",
+                extra_params='{"threads": 8, "precision": "double"}',
             )
             self.assertTrue(created["ok"])
             self.assertTrue(created["remote_ok"])
@@ -59,6 +60,7 @@ class RestServerTestCase(unittest.TestCase):
             one = client.read(case="c1")
             self.assertEqual(one["item"]["status"], "start")
             self.assertEqual(one["item"]["run_host"], socket.gethostname())
+            self.assertEqual(one["item"]["extra_params"], '{"threads": 8, "precision": "double"}')
 
             updated = client.update(case="c1", fields={"note": "patched", "status": "restart"})
             self.assertTrue(updated["ok"])
@@ -93,6 +95,7 @@ class RestServerTestCase(unittest.TestCase):
             inp="job.inp",
             bin_name="solver",
             status="start",
+            extra_params='{"mode": "offline"}',
         )
         self.assertTrue(out["ok"])
         self.assertFalse(out["remote_ok"])
@@ -101,6 +104,7 @@ class RestServerTestCase(unittest.TestCase):
         local_table = list_items(self.local_db)
         self.assertIn("offline-c1", local_table)
         self.assertEqual(local_table["offline-c1"]["run_host"], socket.gethostname())
+        self.assertEqual(local_table["offline-c1"]["extra_params"], '{"mode": "offline"}')
 
     def test_unauthorized_rejected(self):
         server, thread, url = self._start_server()

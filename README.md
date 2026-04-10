@@ -6,7 +6,7 @@ Useful for tracking simulation runs from submit scripts with a simple CLI.
 
 - Python 3
 
-## Revised behavior (v1.3)
+## Revised behavior (v1.4)
 
 - CSV DB tracks `work_dir` as a first-class field.
 - Added `state_changed_at` timestamp (ISO date+time, local time) that updates:
@@ -14,13 +14,16 @@ Useful for tracking simulation runs from submit scripts with a simple CLI.
   - when status changes via `done`
 - Existing `created_at`/`updated_at` remain for compatibility.
 - CSV column order is now stable and script-friendly:
-  - `case, work_dir, bin, inp, input_files, status, note, notes, state_changed_at, created_at, updated_at`
+  - `case, work_dir, bin, inp, input_files, extra_params, status, note, notes, state_changed_at, created_at, updated_at`
 - CLI supports both:
   - quick single-input usage via `--inp file.inp`
   - repeatable multi-input usage via `--input-file fileA --input-file fileB`
 - `--inp` and `--input-file` can be used together. Stored fields:
   - `inp`: primary input (first one)
   - `input_files`: all inputs joined as `;`
+- Extra runtime keyword parameters are supported (useful for parameter-driven runs without dedicated input files):
+  - `--extra-param key=value` (repeatable, stored as JSON text)
+  - `--extra-params '{"threads":8,"mode":"fast"}'` (store a raw params string)
 - Optional short note field is supported via `--note` (legacy alias `--notes`).
 - Status validation remains strict: only `start|restart|done`.
 - Default DB path remains `~/sim_db.csv`.
@@ -77,6 +80,8 @@ python sim_db.py add \
   --work-dir ./runs/case_003 \
   --inp model_003.inp \
   --input-file bc_003.inp \
+  --extra-param threads=16 \
+  --extra-param precision=double \
   --bin solver_v2 \
   --status restart \
   --note "resubmission after mesh fix" \
@@ -196,7 +201,8 @@ export SIM_DB_API_TOKEN='replace-me'
 python sim_db_client.py --url http://127.0.0.1:8765 health
 python sim_db_client.py --url http://127.0.0.1:8765 init
 python sim_db_client.py --url http://127.0.0.1:8765 create \
-  --case c100 --inp c100.inp --bin solver --status start --work-dir /work/c100
+  --case c100 --inp c100.inp --bin solver --status start --work-dir /work/c100 \
+  --extra-params '{"threads":8,"precision":"double"}'
 python sim_db_client.py --url http://127.0.0.1:8765 read --case c100
 python sim_db_client.py --url http://127.0.0.1:8765 update --case c100 --field status=restart --field note='retry'
 python sim_db_client.py --url http://127.0.0.1:8765 done --case c100
@@ -211,7 +217,8 @@ $env:SIM_DB_API_TOKEN = 'replace-me'
 python .\sim_db_client.py --url http://127.0.0.1:8765 health
 python .\sim_db_client.py --url http://127.0.0.1:8765 init
 python .\sim_db_client.py --url http://127.0.0.1:8765 create `
-  --case c100 --inp c100.inp --bin solver --status start --work-dir C:\work\c100
+  --case c100 --inp c100.inp --bin solver --status start --work-dir C:\work\c100 `
+  --extra-params '{"threads":8,"precision":"double"}'
 python .\sim_db_client.py --url http://127.0.0.1:8765 read --case c100
 python .\sim_db_client.py --url http://127.0.0.1:8765 update --case c100 --field status=restart --field note='retry'
 python .\sim_db_client.py --url http://127.0.0.1:8765 done --case c100

@@ -3,13 +3,14 @@ simple database for simulations and more (CSV-backed CRUD)
 
 author: hyharry@github
 license: MIT License
-version: 1.3
+version: 1.4
 """
 
 __doc__ = 'simple database for simulations and more (CSV-backed CRUD)'
 
 import argparse
 import csv
+import json
 import os
 import re
 import sys
@@ -23,6 +24,7 @@ CLI_FIELDS = [
     'bin',
     'inp',
     'input_files',
+    'extra_params',
     'status',
     'note',
     'notes',
@@ -107,6 +109,29 @@ def _normalize_input_files(inp: str | None, input_files: list[str] | None) -> tu
         raise ValueError("At least one input file is required (use --inp and/or --input-file)")
 
     return files[0], files
+
+
+def _normalize_extra_params(extra_params: str | None, extra_param_pairs: list[str] | None) -> str:
+    if extra_params and extra_param_pairs:
+        raise ValueError("Use either --extra-params or --extra-param, not both")
+
+    if extra_params is not None:
+        return str(extra_params)
+
+    out: dict[str, str] = {}
+    for pair in extra_param_pairs or []:
+        if "=" not in pair:
+            raise ValueError(f"Invalid --extra-param '{pair}', expected key=value")
+        key, value = pair.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Invalid --extra-param '{pair}', empty key")
+        out[key] = value
+
+    if not out:
+        return ''
+
+    return json.dumps(out, sort_keys=True, ensure_ascii=False)
 
 
 def create_csv_db(fn_csv: str, dic: Mapping[str, Mapping[str, Any]]) -> None:
@@ -286,6 +311,7 @@ def add_sim_item(
     input_files: list[str] | None = None,
     note: str | None = None,
     work_dir: str | None = None,
+    extra_params: str | None = None,
 ) -> None:
     """Add one simulation item to the DB."""
     _validate_status(status)
@@ -310,6 +336,7 @@ def add_sim_item(
             'bin': bin_name,
             'inp': primary_inp,
             'input_files': _serialize_input_files(files),
+            'extra_params': str(extra_params or ''),
             'status': status,
             'note': note_value,
             'notes': note_value,
@@ -369,6 +396,8 @@ def _build_cli() -> argparse.ArgumentParser:
     p_add.add_argument('--input-file', action='append', default=[], help='Input file (repeatable)')
     p_add.add_argument('--bin', dest='bin_name', required=True, help='Executable / binary name')
     p_add.add_argument('--work-dir', '--wd', dest='work_dir', default=None, help='Working directory for this case (default: current dir)')
+    p_add.add_argument('--extra-param', action='append', default=[], help='Extra runtime parameter key=value (repeatable)')
+    p_add.add_argument('--extra-params', default=None, help='Raw extra runtime parameters string (for example JSON)')
     p_add.add_argument('--status', required=True, help='start|restart|done')
     p_add.add_argument('--note', default='', help='Optional short note/documentation text')
     p_add.add_argument('--notes', dest='note', help='Backward-compatible alias of --note')
@@ -401,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
                 db_path=args.db,
                 note=args.note,
                 work_dir=args.work_dir,
+                extra_params=_normalize_extra_params(args.extra_params, args.extra_param),
             )
         elif args.command == 'done':
             mark_done(case=args.case, db_path=args.db)
