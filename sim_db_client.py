@@ -10,6 +10,18 @@ import sys
 from typing import Any
 from urllib import error, parse, request
 
+
+class RemoteRequestError(RuntimeError):
+    """Base error for remote request failures."""
+
+
+class RemoteTransportError(RemoteRequestError):
+    """Network/transport failure reaching remote server."""
+
+
+class RemoteResponseError(RemoteRequestError):
+    """Remote server responded with an HTTP/application error."""
+
 from sim_db import add_sim_item, del_cases, init_sim_db, mark_done, upd_cases
 
 
@@ -75,7 +87,7 @@ class SimDbClient:
         return self.create(**kwargs)
 
     def read(self, *, case: str, db_path: str | None = None) -> dict[str, Any]:
-        path = f"/cases/{parse.quote(case)}"
+        path = f"/cases/{parse.quote(case, safe='')}"
         if db_path:
             path += "?" + parse.urlencode({"db_path": db_path})
         return self._request("GET", path)
@@ -139,7 +151,7 @@ class SimDbClient:
             if local_error:
                 out["local_error"] = local_error
             return out
-        except RuntimeError as exc:
+        except RemoteTransportError as exc:
             if local_ok:
                 return {
                     "ok": True,
@@ -194,11 +206,11 @@ class SimDbClient:
         if op == "create":
             return self._request("POST", "/cases", payload)
         if op == "update":
-            case = parse.quote(payload["case"])
+            case = parse.quote(payload["case"], safe='')
             remote_payload = {k: v for k, v in payload.items() if k != "case"}
             return self._request("PATCH", f"/cases/{case}", remote_payload)
         if op == "delete":
-            case = parse.quote(payload["case"])
+            case = parse.quote(payload["case"], safe='')
             db_path = payload.get("db_path")
             path = f"/cases/{case}"
             if db_path:
@@ -221,9 +233,9 @@ class SimDbClient:
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8")
             msg = body or str(exc)
-            raise RuntimeError(f"HTTP {exc.code}: {msg}") from exc
-        except error.URLError as exc:
-            raise RuntimeError(f"request failed: {exc}") from exc
+            raise RemoteResponseError(f"HTTP {exc.code}: {msg}") from exc
+        except (error.URLError, TimeoutError) as exc:
+            raise RemoteTransportError(f"request failed: {exc}") from exc
 
 
 def _parse_fields(pairs: list[str] | None) -> dict[str, str]:

@@ -8,12 +8,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from sim_db import (
     ALLOWED_STATUS,
@@ -74,6 +75,7 @@ class SecurityPolicy:
 class SimDbApiServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], policy: SecurityPolicy) -> None:
         self.policy = policy
+        self.mutation_lock = threading.Lock()
         super().__init__(server_address, SimDbRequestHandler)
 
 
@@ -118,7 +120,8 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
                 return
             try:
                 db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
-                init_sim_db(db_path)
+                with self.server.mutation_lock:
+                    init_sim_db(db_path)
                 self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path})
             except Exception as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -176,7 +179,8 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
         req_db = query.get("db_path")
         try:
             db_path = self.server.policy.resolve_db_path(req_db)
-            del_cases(db_path, [case])
+            with self.server.mutation_lock:
+                del_cases(db_path, [case])
             self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case})
         except Exception as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -213,7 +217,8 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
                 return
             try:
                 db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
-                del_cases(db_path, [case])
+                with self.server.mutation_lock:
+                    del_cases(db_path, [case])
                 self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case})
             except Exception as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -221,20 +226,21 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
     def _create_case(self, payload: dict[str, Any]) -> None:
         try:
             db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
-            add_sim_item(
-                case=payload["case"],
-                inp=payload.get("inp"),
-                input_files=payload.get("input_files"),
-                bin_name=payload["bin_name"],
-                status=payload["status"],
-                db_path=db_path,
-                note=payload.get("note"),
-                work_dir=payload.get("work_dir"),
-                extra_params=payload.get("extra_params"),
-            )
-            run_host = payload.get("run_host")
-            if run_host:
-                upd_cases(db_path, {payload["case"]: {"run_host": str(run_host)}})
+            with self.server.mutation_lock:
+                add_sim_item(
+                    case=payload["case"],
+                    inp=payload.get("inp"),
+                    input_files=payload.get("input_files"),
+                    bin_name=payload["bin_name"],
+                    status=payload["status"],
+                    db_path=db_path,
+                    note=payload.get("note"),
+                    work_dir=payload.get("work_dir"),
+                    extra_params=payload.get("extra_params"),
+                )
+                run_host = payload.get("run_host")
+                if run_host:
+                    upd_cases(db_path, {payload["case"]: {"run_host": str(run_host)}})
             self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": payload["case"]})
         except KeyError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
@@ -263,7 +269,8 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
             if run_host:
                 fields["run_host"] = str(run_host)
 
-            upd_cases(db_path, {case: fields})
+            with self.server.mutation_lock:
+                upd_cases(db_path, {case: fields})
             self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case, "updated": sorted(fields.keys())})
         except Exception as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -295,7 +302,7 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         parts = [p for p in path.split("/") if p]
         if len(parts) >= 2 and parts[0] == "cases":
-            return parts[1]
+            return unquote(parts[1])
         return None
 
     def _require_auth(self) -> None:

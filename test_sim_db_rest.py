@@ -2,8 +2,11 @@ import os
 import socket
 import tempfile
 import threading
+import time
 import unittest
+from unittest import mock
 
+import sim_db_server
 from sim_db import list_items
 from sim_db_client import SimDbClient
 from sim_db_server import SecurityPolicy, SimDbApiServer
@@ -117,6 +120,20 @@ class RestServerTestCase(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_dual_write_does_not_fallback_on_http_error(self):
+        server, thread, url = self._start_server()
+        try:
+            bad = SimDbClient(base_url=url, token="wrong", local_db_path=self.local_db)
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
+                bad.create(case="auth-c1", inp="job.inp", bin_name="solver", status="start")
+
+            local_table = list_items(self.local_db)
+            self.assertIn("auth-c1", local_table)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_custom_db_denied_by_default(self):
         server, thread, url = self._start_server()
         try:
@@ -135,6 +152,74 @@ class RestServerTestCase(unittest.TestCase):
             client = SimDbClient(base_url=url, token=self.token, local_db_path=self.local_db)
             client.init(db_path=self.db_other)
             self.assertTrue(os.path.exists(self.db_other))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_case_path_roundtrip_with_url_escaped_case_id(self):
+        server, thread, url = self._start_server()
+        try:
+            client = SimDbClient(base_url=url, token=self.token, local_db_path=self.local_db)
+            client.init()
+            case = "folder/name with space"
+            client.create(case=case, inp="job.inp", bin_name="solver", status="start")
+
+            one = client.read(case=case)
+            self.assertEqual(one["case"], case)
+
+            client.update(case=case, fields={"note": "updated"})
+            one2 = client.read(case=case)
+            self.assertEqual(one2["item"]["note"], "updated")
+
+            client.delete(case=case)
+            all_items = client.list()
+            self.assertNotIn(case, all_items["cases"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_mutations_are_serialized_under_threaded_server(self):
+        server, thread, url = self._start_server()
+        overlap_detected = threading.Event()
+        gate = threading.Lock()
+        original_add = sim_db_server.add_sim_item
+
+        def guarded_add(*args, **kwargs):
+            if not gate.acquire(blocking=False):
+                overlap_detected.set()
+            else:
+                try:
+                    time.sleep(0.1)
+                    return original_add(*args, **kwargs)
+                finally:
+                    gate.release()
+
+        try:
+            with mock.patch("sim_db_server.add_sim_item", side_effect=guarded_add):
+                client = SimDbClient(base_url=url, token=self.token, enable_local_write=False)
+                client.init()
+
+                errors: list[Exception] = []
+
+                def _create(case: str, inp: str) -> None:
+                    try:
+                        client.create(case=case, inp=inp, bin_name="solver", status="start")
+                    except Exception as exc:  # pragma: no cover - defensive for thread join assertions
+                        errors.append(exc)
+
+                t1 = threading.Thread(target=_create, args=("c1", "a.inp"))
+                t2 = threading.Thread(target=_create, args=("c2", "b.inp"))
+                t1.start()
+                t2.start()
+                t1.join(timeout=2)
+                t2.join(timeout=2)
+
+                self.assertFalse(t1.is_alive())
+                self.assertFalse(t2.is_alive())
+                self.assertEqual(errors, [])
+                self.assertFalse(overlap_detected.is_set(), "mutating requests overlapped unexpectedly")
         finally:
             server.shutdown()
             server.server_close()
