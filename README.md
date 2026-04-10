@@ -137,6 +137,40 @@ DB="${DB:-$HOME/sim_db.csv}"
 python /path/to/mini_sim_db/sim_db.py done --case "$CASE" --db "$DB"
 ```
 
+## REST host + client (centralized writes)
+
+New modules (without touching `sim_db.py`):
+
+- `sim_db_server.py` — tiny stdlib HTTP JSON server
+- `sim_db_client.py` — tiny stdlib client + CLI
+
+Security defaults:
+
+- Bearer token is mandatory (`--token` or `SIM_DB_API_TOKEN`)
+- If no allowlist is configured, server only allows writes to the configured default DB path
+- Optional write scope controls:
+  - `--allowed-db-path /exact/path.csv`
+  - `--allowed-base-dir /safe/base/dir`
+
+Start server (local host):
+
+```bash
+export SIM_DB_API_TOKEN='replace-me'
+python sim_db_server.py --host 127.0.0.1 --port 8765 --db ~/sim_db.csv
+```
+
+Client examples:
+
+```bash
+export SIM_DB_API_TOKEN='replace-me'
+python sim_db_client.py --url http://127.0.0.1:8765 health
+python sim_db_client.py --url http://127.0.0.1:8765 init
+python sim_db_client.py --url http://127.0.0.1:8765 add \
+  --case c100 --inp c100.inp --bin solver --status start --work-dir /work/c100
+python sim_db_client.py --url http://127.0.0.1:8765 done --case c100
+python sim_db_client.py --url http://127.0.0.1:8765 list
+```
+
 ## Tests
 
 ```bash
