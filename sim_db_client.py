@@ -22,7 +22,13 @@ class RemoteTransportError(RemoteRequestError):
 class RemoteResponseError(RemoteRequestError):
     """Remote server responded with an HTTP/application error."""
 
-from sim_db import add_sim_item, del_cases, init_sim_db, mark_done, upd_cases
+from sim_db import _read_sim_db, add_sim_item, del_cases, init_sim_db, mark_done, resolve_case_ref, upd_cases
+
+
+def _case_ref(*, case: str | None, job_id: str | None) -> str:
+    if bool(case) == bool(job_id):
+        raise ValueError("use exactly one of case or job_id")
+    return str(case or job_id)
 
 
 class SimDbClient:
@@ -86,15 +92,24 @@ class SimDbClient:
     def add(self, **kwargs: Any) -> dict[str, Any]:
         return self.create(**kwargs)
 
-    def read(self, *, case: str, db_path: str | None = None) -> dict[str, Any]:
-        path = f"/cases/{parse.quote(case, safe='')}"
+    def read(self, *, case: str | None = None, job_id: str | None = None, db_path: str | None = None) -> dict[str, Any]:
+        case_ref = _case_ref(case=case, job_id=job_id)
+        path = f"/cases/{parse.quote(case_ref, safe='')}"
         if db_path:
             path += "?" + parse.urlencode({"db_path": db_path})
         return self._request("GET", path)
 
-    def done(self, *, case: str, db_path: str | None = None, run_host: str | None = None) -> dict[str, Any]:
+    def done(
+        self,
+        *,
+        case: str | None = None,
+        job_id: str | None = None,
+        db_path: str | None = None,
+        run_host: str | None = None,
+    ) -> dict[str, Any]:
         return self.update(
             case=case,
+            job_id=job_id,
             fields={"status": "done"},
             db_path=db_path,
             run_host=run_host,
@@ -103,13 +118,15 @@ class SimDbClient:
     def update(
         self,
         *,
-        case: str,
+        case: str | None = None,
+        job_id: str | None = None,
         fields: dict[str, Any],
         db_path: str | None = None,
         run_host: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "case": case,
+            "job_id": job_id,
             "fields": fields,
             "run_host": run_host or socket.gethostname(),
         }
@@ -117,9 +134,17 @@ class SimDbClient:
             payload["db_path"] = db_path
         return self._dual_write("update", payload)
 
-    def delete(self, *, case: str, db_path: str | None = None, run_host: str | None = None) -> dict[str, Any]:
+    def delete(
+        self,
+        *,
+        case: str | None = None,
+        job_id: str | None = None,
+        db_path: str | None = None,
+        run_host: str | None = None,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "case": case,
+            "job_id": job_id,
             "run_host": run_host or socket.gethostname(),
         }
         if db_path is not None:
@@ -165,10 +190,10 @@ class SimDbClient:
     def _apply_local(self, op: str, payload: dict[str, Any]) -> None:
         assert self.local_db_path is not None
         init_sim_db(self.local_db_path)
-        case = payload["case"]
         run_host = payload.get("run_host")
 
         if op == "create":
+            case = payload["case"]
             add_sim_item(
                 case=case,
                 inp=payload.get("inp"),
@@ -185,6 +210,8 @@ class SimDbClient:
             return
 
         if op == "update":
+            _, rows = _read_sim_db(self.local_db_path)
+            case = resolve_case_ref(rows, _case_ref(case=payload.get("case"), job_id=payload.get("job_id")))
             fields = dict(payload.get("fields") or {})
             if run_host:
                 fields["run_host"] = str(run_host)
@@ -197,6 +224,8 @@ class SimDbClient:
             return
 
         if op == "delete":
+            _, rows = _read_sim_db(self.local_db_path)
+            case = resolve_case_ref(rows, _case_ref(case=payload.get("case"), job_id=payload.get("job_id")))
             del_cases(self.local_db_path, [case])
             return
 
@@ -206,13 +235,13 @@ class SimDbClient:
         if op == "create":
             return self._request("POST", "/cases", payload)
         if op == "update":
-            case = parse.quote(payload["case"], safe='')
-            remote_payload = {k: v for k, v in payload.items() if k != "case"}
-            return self._request("PATCH", f"/cases/{case}", remote_payload)
+            case_ref = parse.quote(_case_ref(case=payload.get("case"), job_id=payload.get("job_id")), safe='')
+            remote_payload = {k: v for k, v in payload.items() if k not in {"case", "job_id"}}
+            return self._request("PATCH", f"/cases/{case_ref}", remote_payload)
         if op == "delete":
-            case = parse.quote(payload["case"], safe='')
+            case_ref = parse.quote(_case_ref(case=payload.get("case"), job_id=payload.get("job_id")), safe='')
             db_path = payload.get("db_path")
-            path = f"/cases/{case}"
+            path = f"/cases/{case_ref}"
             if db_path:
                 path += "?" + parse.urlencode({"db_path": db_path})
             return self._request("DELETE", path)
@@ -287,20 +316,28 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_create_like_args(p_add)
 
     p_read = sub.add_parser("read")
-    p_read.add_argument("--case", required=True)
+    read_target = p_read.add_mutually_exclusive_group(required=True)
+    read_target.add_argument("--case")
+    read_target.add_argument("--job-id", dest="job_id")
     p_read.add_argument("--db", default=None)
 
     p_update = sub.add_parser("update")
-    p_update.add_argument("--case", required=True)
+    update_target = p_update.add_mutually_exclusive_group(required=True)
+    update_target.add_argument("--case")
+    update_target.add_argument("--job-id", dest="job_id")
     p_update.add_argument("--field", action="append", default=None, help="key=value (repeatable)")
     p_update.add_argument("--db", default=None)
 
     p_done = sub.add_parser("done")
-    p_done.add_argument("--case", required=True)
+    done_target = p_done.add_mutually_exclusive_group(required=True)
+    done_target.add_argument("--case")
+    done_target.add_argument("--job-id", dest="job_id")
     p_done.add_argument("--db", default=None)
 
     p_delete = sub.add_parser("delete")
-    p_delete.add_argument("--case", required=True)
+    delete_target = p_delete.add_mutually_exclusive_group(required=True)
+    delete_target.add_argument("--case")
+    delete_target.add_argument("--job-id", dest="job_id")
     p_delete.add_argument("--db", default=None)
 
     p_list = sub.add_parser("list")
@@ -341,13 +378,13 @@ def main(argv: list[str] | None = None) -> int:
                 db_path=args.db,
             )
         elif args.cmd == "read":
-            result = client.read(case=args.case, db_path=args.db)
+            result = client.read(case=args.case, job_id=args.job_id, db_path=args.db)
         elif args.cmd == "update":
-            result = client.update(case=args.case, fields=_parse_fields(args.field), db_path=args.db)
+            result = client.update(case=args.case, job_id=args.job_id, fields=_parse_fields(args.field), db_path=args.db)
         elif args.cmd == "done":
-            result = client.done(case=args.case, db_path=args.db)
+            result = client.done(case=args.case, job_id=args.job_id, db_path=args.db)
         elif args.cmd == "delete":
-            result = client.delete(case=args.case, db_path=args.db)
+            result = client.delete(case=args.case, job_id=args.job_id, db_path=args.db)
         elif args.cmd == "list":
             result = client.list(db_path=args.db)
         else:

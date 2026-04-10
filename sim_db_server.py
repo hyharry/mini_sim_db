@@ -23,7 +23,6 @@ from sim_db import (
     del_cases,
     init_sim_db,
     list_items,
-    mark_done,
     upd_cases,
 )
 
@@ -95,14 +94,13 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
             query = self._query_dict()
             try:
                 db_path = self.server.policy.resolve_db_path(query.get("db_path"))
-                case = self._case_from_path()
-                data = list_items(db_path)
-                if case:
-                    if case not in data:
-                        self._json(HTTPStatus.NOT_FOUND, {"error": f"case not found: {case}"})
+                case_ref = self._case_from_path()
+                with self.server.mutation_lock:
+                    data = list_items(db_path)
+                    if case_ref:
+                        case = self._resolve_case_ref_from_table(data, case_ref)
+                        self._json(HTTPStatus.OK, {"db_path": db_path, "case": case, "item": data[case]})
                         return
-                    self._json(HTTPStatus.OK, {"db_path": db_path, "case": case, "item": data[case]})
-                    return
                 self._json(HTTPStatus.OK, {"db_path": db_path, "cases": data})
             except Exception as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -170,8 +168,8 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized:
             return
 
-        case = self._case_from_path()
-        if not case:
+        case_ref = self._case_from_path()
+        if not case_ref:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "missing case in path"})
             return
 
@@ -180,6 +178,8 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
         try:
             db_path = self.server.policy.resolve_db_path(req_db)
             with self.server.mutation_lock:
+                table = list_items(db_path)
+                case = self._resolve_case_ref_from_table(table, case_ref)
                 del_cases(db_path, [case])
             self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case})
         except Exception as exc:
@@ -197,27 +197,29 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
             self._create_case(payload)
             return
         if self.path == "/done":
-            case = payload.get("case")
-            if not case:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case"})
+            case_ref = payload.get("case") or payload.get("job_id")
+            if not case_ref:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case or job_id"})
                 return
-            self._update_case(case, {"fields": {"status": "done"}, **payload})
+            self._update_case(case_ref, {"fields": {"status": "done"}, **payload})
             return
         if self.path == "/update":
-            case = payload.get("case")
-            if not case:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case"})
+            case_ref = payload.get("case") or payload.get("job_id")
+            if not case_ref:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case or job_id"})
                 return
-            self._update_case(case, payload)
+            self._update_case(case_ref, payload)
             return
         if self.path == "/delete":
-            case = payload.get("case")
-            if not case:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case"})
+            case_ref = payload.get("case") or payload.get("job_id")
+            if not case_ref:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "missing field: case or job_id"})
                 return
             try:
                 db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
                 with self.server.mutation_lock:
+                    table = list_items(db_path)
+                    case = self._resolve_case_ref_from_table(table, case_ref)
                     del_cases(db_path, [case])
                 self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case})
             except Exception as exc:
@@ -247,14 +249,29 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
-    def _update_case(self, case: str, payload: dict[str, Any]) -> None:
+    @staticmethod
+    def _resolve_case_ref_from_table(data: dict[str, dict[str, Any]], case_ref: str) -> str:
+        if case_ref in data:
+            return case_ref
+
+        matches = [case for case, item in data.items() if item.get("job_id") == case_ref]
+        if not matches:
+            raise ValueError(f"case/job_id not found: {case_ref}")
+        if len(matches) > 1:
+            joined = ", ".join(sorted(matches))
+            raise ValueError(f"job_id matches multiple cases ({joined}), use case explicitly")
+        return matches[0]
+
+    def _update_case(self, case_ref: str, payload: dict[str, Any]) -> None:
         try:
             db_path = self.server.policy.resolve_db_path(payload.get("db_path"))
             fields = payload.get("fields")
             if fields is None:
-                fields = {k: v for k, v in payload.items() if k not in {"case", "db_path", "run_host"}}
+                fields = {k: v for k, v in payload.items() if k not in {"case", "job_id", "db_path", "run_host"}}
             if not isinstance(fields, dict) or not fields:
                 raise ValueError("fields must be a non-empty object")
+            if "case" in fields:
+                raise ValueError("field 'case' is immutable")
 
             status = fields.get("status")
             if status is not None:
@@ -270,6 +287,8 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
                 fields["run_host"] = str(run_host)
 
             with self.server.mutation_lock:
+                table = list_items(db_path)
+                case = self._resolve_case_ref_from_table(table, case_ref)
                 upd_cases(db_path, {case: fields})
             self._json(HTTPStatus.OK, {"ok": True, "db_path": db_path, "case": case, "updated": sorted(fields.keys())})
         except Exception as exc:

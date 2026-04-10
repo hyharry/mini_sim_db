@@ -10,6 +10,7 @@ __doc__ = 'simple database for simulations and more (CSV-backed CRUD)'
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -19,11 +20,13 @@ from typing import Any, Mapping
 
 ALLOWED_STATUS = {'start', 'restart', 'done'}
 DEFAULT_DB_PATH = os.path.expanduser('~/sim_db.csv')
+JOB_ID_FIELD = 'job_id'
 CLI_FIELDS = [
     'work_dir',
     'bin',
     'inp',
     'input_files',
+    JOB_ID_FIELD,
     'extra_params',
     'status',
     'note',
@@ -88,12 +91,54 @@ def _dict_table(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
     for row in rows:
         case = row.get('case', '')
         if case:
+            _ensure_row_job_id(row)
             out[case] = {k: v for k, v in row.items() if k != 'case'}
     return out
 
 
 def _serialize_input_files(input_files: list[str]) -> str:
     return ';'.join(input_files)
+
+
+def _parse_input_files(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part for part in str(value).split(';') if part]
+
+
+def derive_job_id(
+    *,
+    case: str,
+    work_dir: str | None = None,
+    inp: str | None = None,
+    input_files: list[str] | None = None,
+) -> str:
+    payload: dict[str, Any] = {'case': str(case)}
+    if work_dir:
+        payload['work_dir'] = str(work_dir)
+    if inp:
+        payload['inp'] = str(inp)
+    if input_files:
+        payload['input_files'] = [str(path) for path in input_files if str(path)]
+
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+    digest = hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]
+    return f'job_{digest}'
+
+
+def _ensure_row_job_id(row: dict[str, str]) -> str:
+    existing = str(row.get(JOB_ID_FIELD, '')).strip()
+    if existing:
+        return existing
+
+    job_id = derive_job_id(
+        case=row.get('case', ''),
+        work_dir=row.get('work_dir') or None,
+        inp=row.get('inp') or None,
+        input_files=_parse_input_files(row.get('input_files')),
+    )
+    row[JOB_ID_FIELD] = job_id
+    return job_id
 
 
 def _normalize_input_files(inp: str | None, input_files: list[str] | None) -> tuple[str, list[str]]:
@@ -301,6 +346,26 @@ def _read_sim_db(db_path: str) -> tuple[list[str], list[dict[str, str]]]:
     return _read_rows(db_path)
 
 
+def resolve_case_ref(rows: list[dict[str, str]], case_or_job_id: str) -> str:
+    if any(row.get('case', '') == case_or_job_id for row in rows):
+        return case_or_job_id
+
+    matches: list[str] = []
+    for row in rows:
+        case = row.get('case', '')
+        if not case:
+            continue
+        if _ensure_row_job_id(row) == case_or_job_id:
+            matches.append(case)
+
+    if not matches:
+        raise ValueError(f"case/job_id not found: {case_or_job_id}")
+    if len(matches) > 1:
+        joined = ', '.join(sorted(matches))
+        raise ValueError(f"job_id matches multiple cases ({joined}), use case explicitly")
+    return matches[0]
+
+
 def add_sim_item(
     case: str,
     inp: str | None,
@@ -336,6 +401,7 @@ def add_sim_item(
             'bin': bin_name,
             'inp': primary_inp,
             'input_files': _serialize_input_files(files),
+            JOB_ID_FIELD: derive_job_id(case=case, work_dir=resolved_work_dir, inp=primary_inp, input_files=files),
             'extra_params': str(extra_params or ''),
             'status': status,
             'note': note_value,
@@ -404,7 +470,9 @@ def _build_cli() -> argparse.ArgumentParser:
     p_add.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to CSV database (default: ~/sim_db.csv)')
 
     p_done = sub.add_parser('done', help='Mark case status as done')
-    p_done.add_argument('--case', required=True, help='Case name / unique key')
+    done_target = p_done.add_mutually_exclusive_group(required=True)
+    done_target.add_argument('--case', help='Case name / unique key')
+    done_target.add_argument('--job-id', dest='job_id', help='Stable job identifier')
     p_done.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to CSV database (default: ~/sim_db.csv)')
 
     p_list = sub.add_parser('list', help='List simulation items')
@@ -433,7 +501,11 @@ def main(argv: list[str] | None = None) -> int:
                 extra_params=_normalize_extra_params(args.extra_params, args.extra_param),
             )
         elif args.command == 'done':
-            mark_done(case=args.case, db_path=args.db)
+            target_case = args.case
+            if args.job_id:
+                _, rows = _read_sim_db(args.db)
+                target_case = resolve_case_ref(rows, args.job_id)
+            mark_done(case=target_case, db_path=args.db)
         elif args.command == 'list':
             items = list_items(args.db)
             if not items:

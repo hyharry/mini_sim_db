@@ -225,6 +225,88 @@ class RestServerTestCase(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_patch_rejects_case_mutation_in_fields(self):
+        server, thread, url = self._start_server()
+        try:
+            client = SimDbClient(base_url=url, token=self.token, local_db_path=self.local_db)
+            client.init()
+            client.create(case="c1", inp="a.inp", bin_name="solver", status="start")
+            with self.assertRaisesRegex(RuntimeError, "immutable"):
+                client.update(case="c1", fields={"case": "c2"})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_read_waits_for_mutation_lock(self):
+        server, thread, url = self._start_server()
+        gate = threading.Event()
+        release = threading.Event()
+
+        original_list = sim_db_server.list_items
+
+        def guarded_list(db_path):
+            if not gate.is_set():
+                gate.set()
+                release.wait(timeout=2)
+            return original_list(db_path)
+
+        try:
+            client = SimDbClient(base_url=url, token=self.token, enable_local_write=False)
+            client.init()
+            client.create(case="c1", inp="a.inp", bin_name="solver", status="start")
+
+            with mock.patch("sim_db_server.list_items", side_effect=guarded_list):
+                writer_done = threading.Event()
+
+                def _update():
+                    client.update(case="c1", fields={"note": "x"})
+                    writer_done.set()
+
+                t = threading.Thread(target=_update)
+                t.start()
+                gate.wait(timeout=2)
+
+                read_done = threading.Event()
+
+                def _read():
+                    client.list()
+                    read_done.set()
+
+                t_read = threading.Thread(target=_read)
+                t_read.start()
+                time.sleep(0.1)
+                self.assertFalse(read_done.is_set())
+
+                release.set()
+                t.join(timeout=2)
+                t_read.join(timeout=2)
+                self.assertTrue(writer_done.is_set())
+                self.assertTrue(read_done.is_set())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_job_id_can_be_used_for_follow_up_updates(self):
+        server, thread, url = self._start_server()
+        try:
+            client = SimDbClient(base_url=url, token=self.token, local_db_path=self.local_db)
+            client.init()
+            client.create(case="c1", inp="a.inp", input_files=["a.inp", "b.inp"], bin_name="solver", status="start", work_dir="/tmp/w")
+            first = client.read(case="c1")
+            job_id = first["item"]["job_id"]
+
+            client.update(job_id=job_id, fields={"note": "by job id", "status": "restart"})
+            second = client.read(job_id=job_id)
+            self.assertEqual(second["case"], "c1")
+            self.assertEqual(second["item"]["note"], "by job id")
+            self.assertEqual(second["item"]["status"], "restart")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

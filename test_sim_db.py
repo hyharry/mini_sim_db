@@ -11,6 +11,7 @@ from sim_db import (
     add_sim_item,
     create_csv_db,
     del_cases,
+    derive_job_id,
     init_sim_db,
     list_items,
     list_sim_db,
@@ -99,6 +100,15 @@ class TestSimpleCliFunctions(unittest.TestCase):
         self.assertEqual(table['case001']['work_dir'], '/tmp/case001')
         self.assertEqual(table['case001']['extra_params'], '{"alpha": 1, "beta": "x"}')
         self.assertEqual(table['case001']['state_changed_at'], table['case001']['updated_at'])
+        self.assertEqual(
+            table['case001']['job_id'],
+            derive_job_id(
+                case='case001',
+                work_dir='/tmp/case001',
+                inp='job.inp',
+                input_files=['job.inp', 'mesh.inp'],
+            ),
+        )
 
         before_change = table['case001']['state_changed_at']
         time.sleep(1)
@@ -156,6 +166,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
                 'bin',
                 'inp',
                 'input_files',
+                'job_id',
                 'extra_params',
                 'status',
                 'note',
@@ -244,6 +255,25 @@ class TestCliSubprocess(unittest.TestCase):
         )
         self.assertNotEqual(r_add.returncode, 0)
         self.assertIn('Use either --extra-params or --extra-param, not both', r_add.stderr)
+
+    def test_cli_done_by_job_id(self):
+        self.assertEqual(self._run('init').returncode, 0)
+        self.assertEqual(
+            self._run(
+                'add',
+                '--case', 'c4',
+                '--inp', 'base.inp',
+                '--bin', 'solver',
+                '--status', 'start',
+                '--work-dir', '/tmp/c4',
+            ).returncode,
+            0,
+        )
+
+        job_id = list_items(os.path.join(self.home_dir, 'sim_db.csv'))['c4']['job_id']
+        r_done = self._run('done', '--job-id', job_id)
+        self.assertEqual(r_done.returncode, 0, msg=r_done.stderr)
+        self.assertEqual(list_items(os.path.join(self.home_dir, 'sim_db.csv'))['c4']['status'], 'done')
 
 
 if __name__ == '__main__':
