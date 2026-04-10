@@ -23,6 +23,7 @@ from sim_db import (
     del_cases,
     init_sim_db,
     list_items,
+    list_view,
     upd_cases,
 )
 
@@ -94,6 +95,17 @@ class SimDbRequestHandler(BaseHTTPRequestHandler):
             query = self._query_dict()
             try:
                 db_path = self.server.policy.resolve_db_path(query.get("db_path"))
+                if urlsplit(self.path).path == "/cases/summary":
+                    status = query.get("status")
+                    run_host = query.get("run_host")
+                    limit = int(query["limit"]) if query.get("limit") else None
+                    sort_by = query.get("sort_by", "updated_at")
+                    desc = query.get("order", "desc").lower() != "asc"
+                    with self.server.mutation_lock:
+                        rows = list_view(db_path=db_path, status=status, run_host=run_host, sort_by=sort_by, desc=desc, limit=limit)
+                    self._json(HTTPStatus.OK, {"db_path": db_path, "count": len(rows), "items": rows})
+                    return
+
                 case_ref = self._case_from_path()
                 with self.server.mutation_lock:
                     data = list_items(db_path)
