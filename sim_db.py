@@ -151,6 +151,7 @@ def _connect_db(db_path: str) -> tuple[sqlite3.Connection, str]:
     first_create = not sqlite_path.exists()
     conn = sqlite3.connect(str(sqlite_path))
     conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys = ON')
     _ensure_schema(conn)
     if first_create and csv_path and csv_path.exists():
         _import_csv_into_conn(conn, csv_path)

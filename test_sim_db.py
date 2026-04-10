@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 import tempfile
 import subprocess
@@ -17,6 +18,7 @@ from sim_db import (
     list_sim_db,
     list_view,
     mark_done,
+    search_sim_db,
     upd_cases,
 )
 
@@ -61,6 +63,23 @@ class TestCRUDOperations(unittest.TestCase):
         del_cases(self.db_path, ['sim_b'])
         table = list_sim_db(self.db_path)
         self.assertNotIn('sim_b', table)
+
+    def test_delete_case_cascades_extra_rows_and_search(self):
+        add_cases(self.db_path, {'sim_c': {'status': 'NEW', 'owner': 'alice'}})
+        self.assertEqual(search_sim_db(self.db_path, "owner == 'alice'"), ['sim_c'])
+
+        del_cases(self.db_path, ['sim_c'])
+
+        sqlite_path = os.path.join(self.tmp_dir.name, 'test.sqlite3')
+        conn = sqlite3.connect(sqlite_path)
+        try:
+            leftovers = conn.execute('SELECT COUNT(*) FROM sim_case_extra WHERE "case" = ?', ('sim_c',)).fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertEqual(leftovers, 0)
+        self.assertEqual(search_sim_db(self.db_path, "owner == 'alice'"), [])
+        self.assertNotIn('sim_c', list_sim_db(self.db_path))
 
 
 class TestSimpleCliFunctions(unittest.TestCase):
