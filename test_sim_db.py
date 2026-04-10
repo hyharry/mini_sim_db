@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -19,6 +20,9 @@ from sim_db import (
     list_view,
     mark_done,
     search_sim_db,
+    sync_export,
+    sync_import,
+    sync_status,
     upd_cases,
 )
 
@@ -211,6 +215,52 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertEqual(r_list.returncode, 0, msg=r_list.stderr)
         self.assertIn('case', r_list.stdout)
         self.assertIn('c2', r_list.stdout)
+
+
+class TestLocalSync(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp_dir.name, 'sync.sqlite3')
+        self.sync_file = os.path.join(self.tmp_dir.name, 'sync.json')
+        init_sim_db(self.db_path)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_sync_export_and_pending_status(self):
+        add_sim_item(case='s1', inp='a.inp', bin_name='solver', status='start', db_path=self.db_path)
+        status_before = sync_status(self.db_path)
+        self.assertEqual(status_before['pending_cases'], 1)
+
+        out = sync_export(self.db_path, self.sync_file)
+        self.assertEqual(out['exported'], 1)
+
+        status_after = sync_status(self.db_path)
+        self.assertEqual(status_after['pending_cases'], 0)
+
+    def test_sync_import_conflict_policy_local_newer_wins(self):
+        add_sim_item(case='s1', inp='a.inp', bin_name='solver', status='start', db_path=self.db_path)
+        sync_export(self.db_path, self.sync_file)
+
+        data = list_items(self.db_path)
+        local = data['s1']
+        older_remote = {
+            'format': 'mini_sim_db_sync_v1',
+            'items': [
+                {
+                    'case': 's1',
+                    **local,
+                    'updated_at': '2000-01-01T00:00:00.000',
+                    'note': 'remote older',
+                }
+            ],
+        }
+        with open(self.sync_file, 'w', encoding='utf-8') as f:
+            json.dump(older_remote, f)
+
+        out = sync_import(self.db_path, self.sync_file)
+        self.assertEqual(len(out['conflicts']), 1)
+        self.assertEqual(out['conflicts'][0]['reason'], 'local_newer')
 
 
 if __name__ == '__main__':

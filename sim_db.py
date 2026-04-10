@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sqlite3
 import sys
 from datetime import datetime
@@ -191,6 +192,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sim_sync_state (
+            job_id TEXT PRIMARY KEY,
+            last_synced_updated_at TEXT NOT NULL DEFAULT '',
+            last_exported_at TEXT NOT NULL DEFAULT '',
+            last_imported_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
     conn.commit()
 
 
@@ -263,6 +274,92 @@ def _table_from_conn(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
     for row in rows:
         out[str(row['case'])] = _row_to_detail(conn, row)
     return out
+
+
+def _base_and_extra_fields(detail: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    base = {k: str(v) for k, v in detail.items() if k in set(CLI_FIELDS)}
+    extras = {k: str(v) for k, v in detail.items() if k not in set(CLI_FIELDS) and k != 'case'}
+    return base, extras
+
+
+def _insert_full_case(conn: sqlite3.Connection, case: str, detail: Mapping[str, Any]) -> None:
+    base, extras = _base_and_extra_fields(detail)
+    conn.execute(
+        """
+        INSERT INTO sim_cases("case", work_dir, bin, inp, input_files, job_id, extra_params, status,
+                              note, notes, state_changed_at, created_at, updated_at, run_host)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            case,
+            base.get('work_dir', ''),
+            base.get('bin', ''),
+            base.get('inp', ''),
+            base.get('input_files', ''),
+            base.get('job_id', ''),
+            base.get('extra_params', ''),
+            base.get('status', ''),
+            base.get('note', base.get('notes', '')),
+            base.get('notes', base.get('note', '')),
+            base.get('state_changed_at', ''),
+            base.get('created_at', ''),
+            base.get('updated_at', ''),
+            base.get('run_host', ''),
+        ),
+    )
+    for key, value in extras.items():
+        conn.execute(
+            'INSERT OR REPLACE INTO sim_case_extra("case", field, value) VALUES (?, ?, ?)',
+            (case, key, value),
+        )
+
+
+def _replace_full_case(conn: sqlite3.Connection, case: str, detail: Mapping[str, Any]) -> None:
+    conn.execute('DELETE FROM sim_cases WHERE "case" = ?', (case,))
+    _insert_full_case(conn, case, detail)
+
+
+def _upsert_sync_state(
+    conn: sqlite3.Connection,
+    job_id: str,
+    *,
+    synced_updated_at: str | None = None,
+    exported_at: str | None = None,
+    imported_at: str | None = None,
+) -> None:
+    row = conn.execute('SELECT * FROM sim_sync_state WHERE job_id = ?', (job_id,)).fetchone()
+    current = dict(row) if row else {
+        'last_synced_updated_at': '',
+        'last_exported_at': '',
+        'last_imported_at': '',
+    }
+    if synced_updated_at is not None:
+        current['last_synced_updated_at'] = str(synced_updated_at)
+    if exported_at is not None:
+        current['last_exported_at'] = str(exported_at)
+    if imported_at is not None:
+        current['last_imported_at'] = str(imported_at)
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO sim_sync_state(job_id, last_synced_updated_at, last_exported_at, last_imported_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (job_id, current['last_synced_updated_at'], current['last_exported_at'], current['last_imported_at']),
+    )
+
+
+def _pending_sync_rows(conn: sqlite3.Connection) -> list[dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT c.*
+        FROM sim_cases c
+        LEFT JOIN sim_sync_state s ON c.job_id = s.job_id
+        WHERE s.last_synced_updated_at IS NULL OR s.last_synced_updated_at < c.updated_at
+        ORDER BY c.updated_at, c."case"
+        """
+    ).fetchall()
+    return [{'case': str(row['case']), **_row_to_detail(conn, row)} for row in rows]
 
 
 def _set_fields(conn: sqlite3.Connection, case: str, fields: Mapping[str, Any]) -> None:
@@ -677,6 +774,19 @@ def _build_cli() -> argparse.ArgumentParser:
     p_import.add_argument('--csv', required=True, help='Path to legacy CSV file')
     p_import.add_argument('--db', default=DEFAULT_DB_PATH, help='Target DB path (CSV path auto-maps to SQLite)')
 
+    p_sync_status = sub.add_parser('sync-status', help='Show local sync status and pending records')
+    p_sync_status.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
+    p_sync_status.add_argument('--table', action='store_true', help='Show pending rows in compact table view')
+
+    p_sync_export = sub.add_parser('sync-export', help='Export pending updates into a JSON sync artifact')
+    p_sync_export.add_argument('--out', required=True, help='Output JSON file path')
+    p_sync_export.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
+    p_sync_export.add_argument('--all', action='store_true', help='Export all rows, not only pending ones')
+
+    p_sync_import = sub.add_parser('sync-import', help='Import updates from a JSON sync artifact')
+    p_sync_import.add_argument('--in', dest='in_path', required=True, help='Input JSON file path')
+    p_sync_import.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
+
     return parser
 
 
@@ -691,6 +801,132 @@ def import_csv(csv_path: str, db_path: str = DEFAULT_DB_PATH) -> int:
     added = int(after) - int(before)
     print(f'Imported {added} rows from {os.path.expanduser(csv_path)} into {sqlite_path}')
     return max(0, added)
+
+
+def sync_status(db_path: str = DEFAULT_DB_PATH) -> dict[str, Any]:
+    conn, _ = _connect_db(db_path)
+    try:
+        total = int(conn.execute('SELECT COUNT(*) FROM sim_cases').fetchone()[0])
+        pending = _pending_sync_rows(conn)
+        synced = max(0, total - len(pending))
+        last_export = conn.execute('SELECT MAX(last_exported_at) FROM sim_sync_state').fetchone()[0] or ''
+        last_import = conn.execute('SELECT MAX(last_imported_at) FROM sim_sync_state').fetchone()[0] or ''
+        return {
+            'total_cases': total,
+            'pending_cases': len(pending),
+            'synced_cases': synced,
+            'last_exported_at': str(last_export),
+            'last_imported_at': str(last_import),
+            'pending': pending,
+        }
+    finally:
+        conn.close()
+
+
+def sync_export(db_path: str, out_path: str, include_all: bool = False) -> dict[str, Any]:
+    conn, sqlite_path = _connect_db(db_path)
+    exported_at = _now_iso()
+    source_host = socket.gethostname()
+    try:
+        if include_all:
+            rows = [{'case': c, **d} for c, d in _table_from_conn(conn).items()]
+        else:
+            rows = _pending_sync_rows(conn)
+
+        artifact = {
+            'format': 'mini_sim_db_sync_v1',
+            'exported_at': exported_at,
+            'source_host': source_host,
+            'source_db': sqlite_path,
+            'count': len(rows),
+            'items': rows,
+        }
+        out_file = Path(out_path).expanduser()
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(json.dumps(artifact, indent=2, ensure_ascii=False, sort_keys=True) + '\n', encoding='utf-8')
+
+        for row in rows:
+            job_id = str(row.get('job_id', ''))
+            if not job_id:
+                continue
+            _upsert_sync_state(
+                conn,
+                job_id,
+                synced_updated_at=str(row.get('updated_at', '')),
+                exported_at=exported_at,
+            )
+        conn.commit()
+        return {'ok': True, 'path': str(out_file), 'exported': len(rows), 'exported_at': exported_at}
+    finally:
+        conn.close()
+
+
+def sync_import(db_path: str, in_path: str) -> dict[str, Any]:
+    in_file = Path(in_path).expanduser()
+    payload = json.loads(in_file.read_text(encoding='utf-8'))
+    if payload.get('format') != 'mini_sim_db_sync_v1':
+        raise ValueError('unsupported sync artifact format')
+    if not isinstance(payload.get('items'), list):
+        raise ValueError('sync artifact must contain items list')
+
+    imported_at = _now_iso()
+    conn, _ = _connect_db(db_path)
+    created = 0
+    updated = 0
+    skipped = 0
+    conflicts: list[dict[str, str]] = []
+    try:
+        for raw in payload['items']:
+            if not isinstance(raw, dict):
+                continue
+            row = {k: str(v) for k, v in raw.items() if k != 'case'}
+            case = str(raw.get('case', '')).strip()
+            job_id = row.get('job_id', '').strip()
+            if not case or not job_id:
+                conflicts.append({'reason': 'missing_case_or_job_id', 'case': case, 'job_id': job_id})
+                continue
+
+            local_by_job = conn.execute('SELECT "case", updated_at FROM sim_cases WHERE job_id = ?', (job_id,)).fetchone()
+            if local_by_job is None:
+                case_taken = conn.execute('SELECT "case" FROM sim_cases WHERE "case" = ?', (case,)).fetchone()
+                if case_taken is not None:
+                    conflicts.append({'reason': 'case_name_taken_by_other_job', 'case': case, 'job_id': job_id})
+                    continue
+                _insert_full_case(conn, case, row)
+                _upsert_sync_state(conn, job_id, synced_updated_at=row.get('updated_at', ''), imported_at=imported_at)
+                created += 1
+                continue
+
+            local_case = str(local_by_job['case'])
+            local_updated = str(local_by_job['updated_at'] or '')
+            remote_updated = row.get('updated_at', '')
+            if remote_updated > local_updated:
+                _replace_full_case(conn, local_case, row)
+                _upsert_sync_state(conn, job_id, synced_updated_at=remote_updated, imported_at=imported_at)
+                updated += 1
+            elif remote_updated == local_updated:
+                _upsert_sync_state(conn, job_id, synced_updated_at=remote_updated, imported_at=imported_at)
+                skipped += 1
+            else:
+                conflicts.append({
+                    'reason': 'local_newer',
+                    'case': local_case,
+                    'job_id': job_id,
+                    'local_updated_at': local_updated,
+                    'incoming_updated_at': remote_updated,
+                })
+
+        conn.commit()
+        return {
+            'ok': True,
+            'imported_file': str(in_file),
+            'created': created,
+            'updated': updated,
+            'skipped': skipped,
+            'conflicts': conflicts,
+        }
+    finally:
+        conn.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -737,6 +973,35 @@ def main(argv: list[str] | None = None) -> int:
                     print(f'{case}: {row}')
         elif args.command == 'import-csv':
             import_csv(args.csv, args.db)
+        elif args.command == 'sync-status':
+            status = sync_status(args.db)
+            print(
+                f"total={status['total_cases']} pending={status['pending_cases']} synced={status['synced_cases']} "
+                f"last_export={status['last_exported_at'] or '-'} last_import={status['last_imported_at'] or '-'}"
+            )
+            pending_rows = status['pending']
+            if pending_rows:
+                if args.table:
+                    print(_format_table(pending_rows))
+                else:
+                    for row in pending_rows:
+                        case = row.pop('case')
+                        print(f"{case}: {row}")
+            else:
+                print('(no pending rows)')
+        elif args.command == 'sync-export':
+            out = sync_export(args.db, args.out, include_all=args.all)
+            print(f"Exported {out['exported']} rows to {out['path']} at {out['exported_at']}")
+        elif args.command == 'sync-import':
+            out = sync_import(args.db, args.in_path)
+            print(
+                f"Imported {out['created']} new, {out['updated']} updated, {out['skipped']} unchanged "
+                f"from {out['imported_file']}"
+            )
+            if out['conflicts']:
+                print('Conflicts:')
+                for conflict in out['conflicts']:
+                    print(json.dumps(conflict, ensure_ascii=False, sort_keys=True))
         else:
             parser.print_help()
             return 1

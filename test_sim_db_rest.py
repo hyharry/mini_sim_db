@@ -6,10 +6,10 @@ import time
 import unittest
 from unittest import mock
 
-import sim_db_server
+import remote_api.server as sim_db_server
 from sim_db import list_items
-from sim_db_client import SimDbClient
-from sim_db_server import SecurityPolicy, SimDbApiServer
+from remote_api.client import SimDbClient
+from remote_api.server import SecurityPolicy, SimDbApiServer
 
 
 class RestServerTestCase(unittest.TestCase):
@@ -197,7 +197,7 @@ class RestServerTestCase(unittest.TestCase):
                     gate.release()
 
         try:
-            with mock.patch("sim_db_server.add_sim_item", side_effect=guarded_add):
+            with mock.patch("remote_api.server.add_sim_item", side_effect=guarded_add):
                 client = SimDbClient(base_url=url, token=self.token, enable_local_write=False)
                 client.init()
 
@@ -256,7 +256,7 @@ class RestServerTestCase(unittest.TestCase):
             client.init()
             client.create(case="c1", inp="a.inp", bin_name="solver", status="start")
 
-            with mock.patch("sim_db_server.list_items", side_effect=guarded_list):
+            with mock.patch("remote_api.server.list_items", side_effect=guarded_list):
                 writer_done = threading.Event()
 
                 def _update():
