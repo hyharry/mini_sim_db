@@ -93,13 +93,24 @@ Examples:
 
 ## Sync
 
+Quick git-like sync (recommended):
+
+```bash
+./sim_db push /path/to/remote.sqlite3
+./sim_db pull /path/to/remote.sqlite3
+```
+
+- `push <remote>` copies local changes to the remote DB path.
+- `pull <remote>` brings remote changes into your local DB.
+- merge policy is per `job_id`: newer `updated_at` wins.
+
+Artifact-based sync (advanced/manual flow):
+
 ```bash
 ./sim_db sync-status --table
 ./sim_db sync-export --out ./sync-out.json
 ./sim_db sync-import --in ./sync-out.json
 ```
-
-Sync merge policy is per `job_id`: newer `updated_at` wins.
 
 ## Tests
 

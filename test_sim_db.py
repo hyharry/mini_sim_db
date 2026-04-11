@@ -6,7 +6,7 @@ import subprocess
 import time
 import unittest
 
-from sim_db import _view_payload, add_sim_item, derive_job_id, find_items, import_csv, init_sim_db, list_items, list_view, mark_done, mark_start, resolve_job_id, sync_export, sync_import, sync_status
+from sim_db import _view_payload, add_sim_item, derive_job_id, find_items, import_csv, init_sim_db, list_items, list_view, mark_done, mark_start, resolve_job_id, sync_export, sync_import, sync_pull, sync_push, sync_status
 
 
 class TestSimpleCliFunctions(unittest.TestCase):
@@ -141,6 +141,23 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn('matches multiple rows', done.stderr)
 
+    def test_cli_push_and_pull_with_remote_path(self):
+        local_db = os.path.join(self.home_dir, 'local.sqlite3')
+        remote_db = os.path.join(self.home_dir, 'remote.sqlite3')
+        self.assertEqual(self._run('init', '--db', local_db).returncode, 0)
+        self.assertEqual(self._run('add', '--db', local_db, '--case', 'c-local', '--inp', 'a.inp', '--bin', 'solver', '--status', 'start').returncode, 0)
+        pushed = self._run('push', '--db', local_db, remote_db)
+        self.assertEqual(pushed.returncode, 0)
+        self.assertIn('Pushed to', pushed.stdout)
+
+        self.assertEqual(self._run('add', '--db', remote_db, '--case', 'c-remote', '--inp', 'b.inp', '--bin', 'solver', '--status', 'restart').returncode, 0)
+        pulled = self._run('pull', '--db', local_db, remote_db)
+        self.assertEqual(pulled.returncode, 0)
+        self.assertIn('Pulled from', pulled.stdout)
+        listed = self._run('list', '--db', local_db)
+        self.assertIn('c-local', listed.stdout)
+        self.assertIn('c-remote', listed.stdout)
+
 
 class TestLocalSync(unittest.TestCase):
     def setUp(self):
@@ -163,6 +180,22 @@ class TestLocalSync(unittest.TestCase):
         self.assertEqual(payload['count'], 1)
         imported = sync_import(self.db_path, self.sync_file)
         self.assertEqual(imported['skipped'], 1)
+
+    def test_sync_push_and_pull(self):
+        remote_db = os.path.join(self.tmp_dir.name, 'remote.sqlite3')
+        init_sim_db(remote_db)
+
+        add_sim_item(case='local-case', inp='a.inp', bin_name='solver', status='start', db_path=self.db_path)
+        pushed = sync_push(self.db_path, remote_db)
+        self.assertEqual(pushed['created'], 1)
+
+        add_sim_item(case='remote-case', inp='b.inp', bin_name='solver', status='restart', db_path=remote_db)
+        pulled = sync_pull(self.db_path, remote_db)
+        self.assertEqual(pulled['created'], 1)
+
+        rows = list_view(self.db_path)
+        names = {row['case'] for row in rows}
+        self.assertEqual(names, {'local-case', 'remote-case'})
 
 
 if __name__ == '__main__':
