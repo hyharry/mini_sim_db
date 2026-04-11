@@ -727,21 +727,61 @@ function applyView() {
 
 function renderTable(rows) {
   const wrap = document.getElementById('tableWrap');
+  wrap.replaceChildren();
   if (!rows.length) {
-    wrap.innerHTML = '<p>(empty)</p>';
+    const empty = document.createElement('p');
+    empty.textContent = '(empty)';
+    wrap.appendChild(empty);
     return;
   }
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
   const headerCols = [...state.columns, '_actions'];
-  const head = '<tr>' + headerCols.map(c => {
-    if (c === '_actions') return '<th>actions</th>';
-    return `<th><button data-sort="${c}">${c}${state.sortBy === c ? (state.desc ? ' ▼' : ' ▲') : ''}</button></th>`;
-  }).join('') + '</tr>';
-  const body = rows.map(r => {
-    const cells = state.columns.map(c => `<td>${String(r[c] || '').replaceAll('<', '&lt;')}</td>`).join('');
-    const actions = `<td><div class="actions"><button data-job="${r.job_id}" data-action="start">start</button><button data-job="${r.job_id}" data-action="done">done</button></div></td>`;
-    return `<tr>${cells}${actions}</tr>`;
-  }).join('');
-  wrap.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+
+  headerCols.forEach((c) => {
+    const th = document.createElement('th');
+    if (c === '_actions') {
+      th.textContent = 'actions';
+    } else {
+      const btn = document.createElement('button');
+      btn.setAttribute('data-sort', c);
+      btn.textContent = `${c}${state.sortBy === c ? (state.desc ? ' ▼' : ' ▲') : ''}`;
+      th.appendChild(btn);
+    }
+    headRow.appendChild(th);
+  });
+
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach((r) => {
+    const tr = document.createElement('tr');
+    state.columns.forEach((c) => {
+      const td = document.createElement('td');
+      td.textContent = String(r[c] || '');
+      tr.appendChild(td);
+    });
+
+    const actionsTd = document.createElement('td');
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'actions';
+    ['start', 'done'].forEach((action) => {
+      const btn = document.createElement('button');
+      btn.setAttribute('data-job', String(r.job_id || ''));
+      btn.setAttribute('data-action', action);
+      btn.textContent = action;
+      actionsDiv.appendChild(btn);
+    });
+    actionsTd.appendChild(actionsDiv);
+    tr.appendChild(actionsTd);
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  wrap.appendChild(table);
 
   wrap.querySelectorAll('button[data-sort]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -777,7 +817,13 @@ async function loadData() {
   state.columns = data.columns || [];
   const sel = document.getElementById('sortField');
   const old = state.sortBy;
-  sel.innerHTML = state.columns.map(c => `<option value="${c}">${c}</option>`).join('');
+  sel.replaceChildren();
+  state.columns.forEach((c) => {
+    const opt = document.createElement('option');
+    opt.value = c;
+    opt.textContent = c;
+    sel.appendChild(opt);
+  });
   state.sortBy = state.columns.includes(old) ? old : (state.columns.includes('updated_at') ? 'updated_at' : state.columns[0]);
   sel.value = state.sortBy;
   applyView();
