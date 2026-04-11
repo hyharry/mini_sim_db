@@ -12,9 +12,13 @@ import re
 import socket
 import sqlite3
 import sys
+import threading
+import webbrowser
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 ALLOWED_STATUS = {'start', 'restart', 'done'}
 DEFAULT_DB_PATH = os.path.expanduser('~/sim_db.csv')
@@ -653,6 +657,214 @@ def sync_import(db_path: str, in_path: str) -> dict[str, Any]:
         conn.close()
 
 
+def mark_start(job_id: str | None = None, db_path: str = DEFAULT_DB_PATH, case: str | None = None) -> None:
+    if job_id is None:
+        _, rows = _read_sim_db(db_path)
+        job_id = resolve_job_id(rows, case=case)
+    now = _now_iso()
+    upd_case_by_job_id(db_path, job_id, {'status': 'start', 'updated_at': now})
+    print(f"Job '{job_id}' marked as start")
+
+
+def _view_payload(db_path: str) -> dict[str, Any]:
+    rows = list_view(db_path=db_path, sort_by='updated_at', desc=True)
+    columns = _ordered_fieldnames([*{k for row in rows for k in row.keys()}])
+    return {'rows': rows, 'columns': columns}
+
+
+def _view_html() -> str:
+    return '''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>mini_sim_db view</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
+    input, select, button { padding: 6px 8px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #ddd; padding: 6px; vertical-align: top; }
+    th button { all: unset; cursor: pointer; color: #0a58ca; }
+    tr:nth-child(even) { background: #fafafa; }
+    .actions { display: flex; gap: 6px; }
+    .muted { color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h2>mini_sim_db local view</h2>
+  <div class="toolbar">
+    <label>Filter <input id="filterText" placeholder="case / note / any column" /></label>
+    <label>Sort by <select id="sortField"></select></label>
+    <button id="ascBtn">Date/Field ↑</button>
+    <button id="descBtn">Date/Field ↓</button>
+    <button id="reloadBtn">Reload</button>
+    <span class="muted" id="meta"></span>
+  </div>
+  <div id="tableWrap"></div>
+<script>
+let state = { rows: [], columns: [], sortBy: 'updated_at', desc: true, filterText: '' };
+
+function cmpValue(a, b) {
+  const da = Date.parse(a || '');
+  const db = Date.parse(b || '');
+  if (!Number.isNaN(da) && !Number.isNaN(db)) return da - db;
+  return String(a || '').localeCompare(String(b || ''), undefined, { sensitivity: 'base' });
+}
+
+function applyView() {
+  const filter = state.filterText.trim().toLowerCase();
+  let rows = [...state.rows];
+  if (filter) {
+    rows = rows.filter(r => state.columns.some(c => String(r[c] || '').toLowerCase().includes(filter)));
+  }
+  rows.sort((a, b) => {
+    const d = cmpValue(a[state.sortBy], b[state.sortBy]);
+    return state.desc ? -d : d;
+  });
+  renderTable(rows);
+  document.getElementById('meta').textContent = `${rows.length} / ${state.rows.length} rows`;
+}
+
+function renderTable(rows) {
+  const wrap = document.getElementById('tableWrap');
+  if (!rows.length) {
+    wrap.innerHTML = '<p>(empty)</p>';
+    return;
+  }
+  const headerCols = [...state.columns, '_actions'];
+  const head = '<tr>' + headerCols.map(c => {
+    if (c === '_actions') return '<th>actions</th>';
+    return `<th><button data-sort="${c}">${c}${state.sortBy === c ? (state.desc ? ' ▼' : ' ▲') : ''}</button></th>`;
+  }).join('') + '</tr>';
+  const body = rows.map(r => {
+    const cells = state.columns.map(c => `<td>${String(r[c] || '').replaceAll('<', '&lt;')}</td>`).join('');
+    const actions = `<td><div class="actions"><button data-job="${r.job_id}" data-action="start">start</button><button data-job="${r.job_id}" data-action="done">done</button></div></td>`;
+    return `<tr>${cells}${actions}</tr>`;
+  }).join('');
+  wrap.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+
+  wrap.querySelectorAll('button[data-sort]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const field = btn.getAttribute('data-sort');
+      if (state.sortBy === field) state.desc = !state.desc;
+      else { state.sortBy = field; state.desc = true; }
+      applyView();
+    });
+  });
+
+  wrap.querySelectorAll('button[data-action]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const jobId = btn.getAttribute('data-job');
+      const action = btn.getAttribute('data-action');
+      btn.disabled = true;
+      try {
+        const resp = await fetch(`/api/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job_id: jobId }) });
+        if (!resp.ok) throw new Error(await resp.text());
+        await loadData();
+      } catch (err) {
+        alert(String(err));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+async function loadData() {
+  const resp = await fetch('/api/rows');
+  const data = await resp.json();
+  state.rows = data.rows || [];
+  state.columns = data.columns || [];
+  const sel = document.getElementById('sortField');
+  const old = state.sortBy;
+  sel.innerHTML = state.columns.map(c => `<option value="${c}">${c}</option>`).join('');
+  state.sortBy = state.columns.includes(old) ? old : (state.columns.includes('updated_at') ? 'updated_at' : state.columns[0]);
+  sel.value = state.sortBy;
+  applyView();
+}
+
+document.getElementById('filterText').addEventListener('input', (e) => { state.filterText = e.target.value || ''; applyView(); });
+document.getElementById('sortField').addEventListener('change', (e) => { state.sortBy = e.target.value; applyView(); });
+document.getElementById('ascBtn').addEventListener('click', () => { state.desc = false; applyView(); });
+document.getElementById('descBtn').addEventListener('click', () => { state.desc = true; applyView(); });
+document.getElementById('reloadBtn').addEventListener('click', loadData);
+loadData();
+</script>
+</body>
+</html>'''
+
+
+def run_local_view(db_path: str, host: str = '127.0.0.1', port: int = 8765, open_browser: bool = True) -> None:
+    class ViewHandler(BaseHTTPRequestHandler):
+        def _write_json(self, code: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _read_json(self) -> dict[str, Any]:
+            length = int(self.headers.get('Content-Length', '0') or '0')
+            raw = self.rfile.read(length) if length > 0 else b'{}'
+            try:
+                return json.loads(raw.decode('utf-8') or '{}')
+            except json.JSONDecodeError:
+                return {}
+
+        def do_GET(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path
+            if path in ('/', '/index.html'):
+                body = _view_html().encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == '/api/rows':
+                self._write_json(200, _view_payload(db_path))
+                return
+            self._write_json(404, {'error': 'not found'})
+
+        def do_POST(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path
+            payload = self._read_json()
+            job_id = str(payload.get('job_id', '')).strip()
+            if not job_id:
+                self._write_json(400, {'error': 'missing job_id'})
+                return
+            try:
+                if path == '/api/start':
+                    mark_start(job_id=job_id, db_path=db_path)
+                    self._write_json(200, {'ok': True, 'job_id': job_id, 'status': 'start'})
+                    return
+                if path == '/api/done':
+                    mark_done(job_id=job_id, db_path=db_path)
+                    self._write_json(200, {'ok': True, 'job_id': job_id, 'status': 'done'})
+                    return
+            except Exception as exc:
+                self._write_json(400, {'error': str(exc)})
+                return
+            self._write_json(404, {'error': 'not found'})
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+            return
+
+    server = ThreadingHTTPServer((host, port), ViewHandler)
+    local_url = f'http://{host}:{port}/'
+    print(f'Local view running at {local_url}')
+    print('Press Ctrl+C to stop.')
+    if open_browser:
+        threading.Thread(target=lambda: webbrowser.open(local_url), daemon=True).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
 def _format_table(rows: list[dict[str, str]]) -> str:
     cols = ['case', 'status', 'job_id', 'bin', 'inp', 'updated_at', 'run_host', 'note']
     widths = {c: len(c) for c in cols}
@@ -731,6 +943,11 @@ def _build_cli() -> argparse.ArgumentParser:
     p_list.add_argument('--limit', type=int, default=None, help='Maximum number of rows to show.')
     p_list.add_argument('--table', action='store_true', help='Show compact table view (easy inspection)')
 
+    p_view = sub.add_parser('view', help='Open a local web UI for browsing/filtering/sorting rows and quick status actions')
+    p_view.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
+    p_view.add_argument('--host', default='127.0.0.1', help='Bind host for local web UI (default: 127.0.0.1)')
+    p_view.add_argument('--port', type=int, default=8765, help='Bind port for local web UI (default: 8765)')
+    p_view.add_argument('--no-open', action='store_true', help='Do not auto-open a browser tab')
 
     p_find = sub.add_parser(
         'find',
@@ -822,6 +1039,8 @@ def main(argv: list[str] | None = None) -> int:
                     case = row.get('case', '')
                     detail = {k: v for k, v in row.items() if k != 'case'}
                     print(f'{case}: {detail}')
+        elif args.command == 'view':
+            run_local_view(db_path=args.db, host=args.host, port=args.port, open_browser=not args.no_open)
         elif args.command == 'import-csv':
             import_csv(args.csv, args.db)
         elif args.command == 'sync-status':

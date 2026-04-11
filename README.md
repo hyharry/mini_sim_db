@@ -33,6 +33,9 @@ This means repeated runs of the same case are supported cleanly as long as the r
 
 ./sim_db list --table
 ./sim_db done --job-id <job_id>
+
+# local web view (opens browser)
+./sim_db view
 ```
 
 ## CLI behavior
@@ -47,6 +50,27 @@ Use `./sim_db add --help` for full help and examples.
 - `--case` only works when it resolves to exactly one row
 - if multiple rows share the same case label, the CLI tells you to use `--job-id`
 
+
+## Local view UI
+
+Use a lightweight local web page to browse all rows/columns and quickly change status:
+
+```bash
+./sim_db view
+```
+
+What it supports:
+- shows all rows and all columns from your local DB
+- text filtering across all columns
+- obvious sorting controls (date/field ascending or descending)
+- one-click `start` and `done` actions per row
+
+Optional flags:
+
+```bash
+./sim_db view --port 8765 --host 127.0.0.1
+./sim_db view --no-open   # keep server running but do not auto-open browser
+```
 
 ## Search
 
