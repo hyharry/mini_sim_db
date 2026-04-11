@@ -188,10 +188,13 @@ class TestLocalSync(unittest.TestCase):
         add_sim_item(case='local-case', inp='a.inp', bin_name='solver', status='start', db_path=self.db_path)
         pushed = sync_push(self.db_path, remote_db)
         self.assertEqual(pushed['created'], 1)
+        self.assertEqual(sync_status(self.db_path)['pending_cases'], 0)
 
         add_sim_item(case='remote-case', inp='b.inp', bin_name='solver', status='restart', db_path=remote_db)
+        self.assertEqual(sync_status(remote_db)['pending_cases'], 1)
         pulled = sync_pull(self.db_path, remote_db)
         self.assertEqual(pulled['created'], 1)
+        self.assertEqual(sync_status(remote_db)['pending_cases'], 0)
 
         rows = list_view(self.db_path)
         names = {row['case'] for row in rows}

@@ -920,6 +920,7 @@ def sync_push(db_path: str, remote: str) -> dict[str, Any]:
     try:
         sync_export(db_path, artifact_path, include_all=True, mark_synced=False)
         out = sync_import(remote_db, artifact_path)
+        sync_export(db_path, artifact_path, include_all=False, mark_synced=True)
         out['remote'] = remote_db
         out['direction'] = 'push'
         return out
@@ -934,6 +935,7 @@ def sync_pull(db_path: str, remote: str) -> dict[str, Any]:
     try:
         sync_export(remote_db, artifact_path, include_all=True, mark_synced=False)
         out = sync_import(db_path, artifact_path)
+        sync_export(remote_db, artifact_path, include_all=False, mark_synced=True)
         out['remote'] = remote_db
         out['direction'] = 'pull'
         return out
