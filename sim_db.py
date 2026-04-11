@@ -12,6 +12,7 @@ import re
 import socket
 import sqlite3
 import sys
+import tempfile
 import threading
 import webbrowser
 from datetime import datetime
@@ -581,7 +582,7 @@ def sync_status(db_path: str = DEFAULT_DB_PATH) -> dict[str, Any]:
         conn.close()
 
 
-def sync_export(db_path: str, out_path: str, include_all: bool = False) -> dict[str, Any]:
+def sync_export(db_path: str, out_path: str, include_all: bool = False, mark_synced: bool = True) -> dict[str, Any]:
     conn, sqlite_path = _connect_db(db_path)
     exported_at = _now_iso()
     source_host = socket.gethostname()
@@ -594,11 +595,12 @@ def sync_export(db_path: str, out_path: str, include_all: bool = False) -> dict[
         out_file = Path(out_path).expanduser()
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(json.dumps(artifact, indent=2, ensure_ascii=False, sort_keys=True) + '\n', encoding='utf-8')
-        for row in rows:
-            job_id = str(row.get('job_id', ''))
-            if job_id:
-                conn.execute('INSERT OR REPLACE INTO sim_sync_state(job_id, last_synced_updated_at, last_exported_at, last_imported_at) VALUES (?, ?, ?, COALESCE((SELECT last_imported_at FROM sim_sync_state WHERE job_id = ?), \"\"))', (job_id, str(row.get('updated_at', '')), exported_at, job_id))
-        conn.commit()
+        if mark_synced:
+            for row in rows:
+                job_id = str(row.get('job_id', ''))
+                if job_id:
+                    conn.execute('INSERT OR REPLACE INTO sim_sync_state(job_id, last_synced_updated_at, last_exported_at, last_imported_at) VALUES (?, ?, ?, COALESCE((SELECT last_imported_at FROM sim_sync_state WHERE job_id = ?), \"\"))', (job_id, str(row.get('updated_at', '')), exported_at, job_id))
+            conn.commit()
         return {'ok': True, 'path': str(out_file), 'exported': len(rows), 'exported_at': exported_at}
     finally:
         conn.close()
@@ -911,6 +913,36 @@ def run_local_view(db_path: str, host: str = '127.0.0.1', port: int = 8765, open
         server.server_close()
 
 
+def sync_push(db_path: str, remote: str) -> dict[str, Any]:
+    remote_db = os.path.expanduser(remote)
+    with tempfile.NamedTemporaryFile(prefix='mini_sim_db_push_', suffix='.json', delete=False) as tmp:
+        artifact_path = tmp.name
+    try:
+        sync_export(db_path, artifact_path, include_all=True, mark_synced=False)
+        out = sync_import(remote_db, artifact_path)
+        sync_export(db_path, artifact_path, include_all=False, mark_synced=True)
+        out['remote'] = remote_db
+        out['direction'] = 'push'
+        return out
+    finally:
+        Path(artifact_path).unlink(missing_ok=True)
+
+
+def sync_pull(db_path: str, remote: str) -> dict[str, Any]:
+    remote_db = os.path.expanduser(remote)
+    with tempfile.NamedTemporaryFile(prefix='mini_sim_db_pull_', suffix='.json', delete=False) as tmp:
+        artifact_path = tmp.name
+    try:
+        sync_export(remote_db, artifact_path, include_all=True, mark_synced=False)
+        out = sync_import(db_path, artifact_path)
+        sync_export(remote_db, artifact_path, include_all=False, mark_synced=True)
+        out['remote'] = remote_db
+        out['direction'] = 'pull'
+        return out
+    finally:
+        Path(artifact_path).unlink(missing_ok=True)
+
+
 def _format_table(rows: list[dict[str, str]]) -> str:
     cols = ['case', 'status', 'job_id', 'bin', 'inp', 'updated_at', 'run_host', 'note']
     widths = {c: len(c) for c in cols}
@@ -933,6 +965,8 @@ def _build_cli() -> argparse.ArgumentParser:
             '  ./sim_db add --case case_001 --inp variant.inp --bin solver --status restart\n'
             '  ./sim_db done --job-id <job_id>\n'
             '  ./sim_db list --table\n'
+            '  ./sim_db push /path/to/remote.sqlite3\n'
+            '  ./sim_db pull /path/to/remote.sqlite3\n'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1036,6 +1070,14 @@ def _build_cli() -> argparse.ArgumentParser:
     p_sync_import = sub.add_parser('sync-import', help='Import updates from a JSON sync artifact')
     p_sync_import.add_argument('--in', dest='in_path', required=True, help='Input JSON file path')
     p_sync_import.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
+
+    p_push = sub.add_parser('push', help='Push local updates to a remote DB path')
+    p_push.add_argument('remote', help='Remote DB path (for example /shared/remote.sqlite3)')
+    p_push.add_argument('--db', default=DEFAULT_DB_PATH, help='Local DB path (CSV path auto-maps to SQLite)')
+
+    p_pull = sub.add_parser('pull', help='Pull updates from a remote DB path into local DB')
+    p_pull.add_argument('remote', help='Remote DB path (for example /shared/remote.sqlite3)')
+    p_pull.add_argument('--db', default=DEFAULT_DB_PATH, help='Local DB path (CSV path auto-maps to SQLite)')
     return parser
 
 
@@ -1109,6 +1151,20 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == 'sync-import':
             out = sync_import(args.db, args.in_path)
             print(f"Imported {out['created']} new, {out['updated']} updated, {out['skipped']} unchanged from {out['imported_file']}")
+            if out['conflicts']:
+                print('Conflicts:')
+                for conflict in out['conflicts']:
+                    print(json.dumps(conflict, ensure_ascii=False, sort_keys=True))
+        elif args.command == 'push':
+            out = sync_push(args.db, args.remote)
+            print(f"Pushed to {out['remote']}: {out['created']} created, {out['updated']} updated, {out['skipped']} unchanged")
+            if out['conflicts']:
+                print('Conflicts:')
+                for conflict in out['conflicts']:
+                    print(json.dumps(conflict, ensure_ascii=False, sort_keys=True))
+        elif args.command == 'pull':
+            out = sync_pull(args.db, args.remote)
+            print(f"Pulled from {out['remote']}: {out['created']} created, {out['updated']} updated, {out['skipped']} unchanged")
             if out['conflicts']:
                 print('Conflicts:')
                 for conflict in out['conflicts']:
