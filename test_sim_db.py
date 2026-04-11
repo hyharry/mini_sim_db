@@ -19,6 +19,7 @@ from sim_db import (
     list_sim_db,
     list_view,
     mark_done,
+    resolve_case_ref,
     search_sim_db,
     sync_export,
     sync_import,
@@ -117,7 +118,8 @@ class TestSimpleCliFunctions(unittest.TestCase):
         self.assertEqual(table['case001']['note'], 'from test')
         self.assertEqual(table['case001']['work_dir'], '/tmp/case001')
         self.assertEqual(table['case001']['extra_params'], '{"alpha": 1, "beta": "x"}')
-        self.assertEqual(table['case001']['state_changed_at'], table['case001']['updated_at'])
+        self.assertNotIn('state_changed_at', table['case001'])
+        self.assertNotIn('notes', table['case001'])
         self.assertEqual(
             table['case001']['job_id'],
             derive_job_id(
@@ -129,14 +131,13 @@ class TestSimpleCliFunctions(unittest.TestCase):
         )
         self.assertRegex(table['case001']['job_id'], r'^[0-9a-f]{16}$')
 
-        before_change = table['case001']['state_changed_at']
+        before_change = table['case001']['updated_at']
         time.sleep(1)
         mark_done('case001', self.db_path)
 
         table = list_items(self.db_path)
         self.assertEqual(table['case001']['status'], 'done')
-        self.assertNotEqual(before_change, table['case001']['state_changed_at'])
-        self.assertEqual(table['case001']['state_changed_at'], table['case001']['updated_at'])
+        self.assertNotEqual(before_change, table['case001']['updated_at'])
 
     def test_status_validation(self):
         init_sim_db(self.db_path)
@@ -164,6 +165,16 @@ class TestSimpleCliFunctions(unittest.TestCase):
         init_sim_db(self.db_path)
         import_csv(csv_file, self.db_path)
         self.assertIn('legacy1', list_items(self.db_path))
+
+    def test_resolve_case_ref_prefers_explicit_fields(self):
+        init_sim_db(self.db_path)
+        add_sim_item(case='same_case_a', inp='a.inp', bin_name='solver', status='start', db_path=self.db_path, work_dir='/tmp/x')
+        rows = [{'case': c, **d} for c, d in list_items(self.db_path).items()]
+        job_id = rows[0]['job_id']
+        self.assertEqual(resolve_case_ref(rows, case='same_case_a'), 'same_case_a')
+        self.assertEqual(resolve_case_ref(rows, job_id=job_id), 'same_case_a')
+        with self.assertRaises(ValueError):
+            resolve_case_ref(rows, case='missing')
 
 
 class TestCliSubprocess(unittest.TestCase):
@@ -215,6 +226,38 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertEqual(r_list.returncode, 0, msg=r_list.stderr)
         self.assertIn('case', r_list.stdout)
         self.assertIn('c2', r_list.stdout)
+
+    def test_cli_help_has_examples_and_state_guidance(self):
+        r_top = self._run('--help')
+        self.assertEqual(r_top.returncode, 0)
+        self.assertIn('Examples:', r_top.stdout)
+        self.assertIn('./sim_db add --case case_001', r_top.stdout)
+
+        r_add = self._run('add', '--help')
+        self.assertEqual(r_add.returncode, 0)
+        self.assertIn('job_id is derived', r_add.stdout)
+        self.assertIn('--input-file', r_add.stdout)
+        self.assertIn('Deprecated alias of --note', r_add.stdout)
+
+        r_done = self._run('done', '--help')
+        self.assertEqual(r_done.returncode, 0)
+        self.assertIn('Prefer --job-id', r_done.stdout)
+        self.assertIn('./sim_db done --job-id', r_done.stdout)
+
+    def test_cli_done_by_job_id(self):
+        self.assertEqual(self._run('init').returncode, 0)
+        self.assertEqual(
+            self._run('add', '--case', 'c2', '--inp', 'a.inp', '--bin', 'solver', '--status', 'start').returncode,
+            0,
+        )
+        r_list = self._run('list')
+        self.assertEqual(r_list.returncode, 0, msg=r_list.stderr)
+        self.assertIn('job_id', r_list.stdout)
+        prefix = "'job_id': '"
+        job_id = r_list.stdout.split(prefix, 1)[1].split("'", 1)[0]
+        r_done = self._run('done', '--job-id', job_id)
+        self.assertEqual(r_done.returncode, 0, msg=r_done.stderr)
+        self.assertIn('marked as done', r_done.stdout)
 
 
 class TestLocalSync(unittest.TestCase):

@@ -36,8 +36,6 @@ CLI_FIELDS = [
     'extra_params',
     'status',
     'note',
-    'notes',
-    'state_changed_at',
     'created_at',
     'updated_at',
     'run_host',
@@ -56,28 +54,48 @@ def _ordered_fieldnames(fieldnames: list[str]) -> list[str]:
         if field and field not in seen:
             seen.add(field)
             unique.append(field)
-
     ordered: list[str] = []
-    for field in PREFERRED_FIELD_ORDER:
-        if field in seen:
-            ordered.append(field)
-
-    extras = sorted(f for f in unique if f not in set(PREFERRED_FIELD_ORDER))
-    return [*ordered, *extras]
-
-
-def _serialize_input_files(input_files: list[str]) -> str:
-    return ';'.join(input_files)
+    for preferred in PREFERRED_FIELD_ORDER:
+        if preferred in seen:
+            ordered.append(preferred)
+            seen.remove(preferred)
+    ordered.extend(sorted(seen))
+    return ordered
 
 
-def _parse_input_files(value: str | None) -> list[str]:
-    if not value:
+def _db_paths(db_path: str) -> tuple[Path, Path | None]:
+    expanded = Path(db_path).expanduser()
+    if expanded.suffix.lower() == '.csv':
+        return expanded.with_suffix('.sqlite3'), expanded
+    if expanded.suffix.lower() == '.sqlite3':
+        return expanded, None
+    return expanded.with_suffix('.sqlite3'), None
+
+
+def _parse_input_files(raw: str | None) -> list[str]:
+    if raw is None:
         return []
-    return [part for part in str(value).split(';') if part]
+    parts = re.split(r'[;,]', str(raw))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _serialize_input_files(files: list[str]) -> str:
+    return ';'.join([str(f).strip() for f in files if str(f).strip()])
+
+
+def _normalize_input_files(inp: str | None, input_files: list[str] | None) -> tuple[str, list[str]]:
+    files: list[str] = []
+    if input_files:
+        files.extend([str(f).strip() for f in input_files if str(f).strip()])
+    if inp:
+        inp_str = str(inp).strip()
+        if inp_str and inp_str not in files:
+            files.insert(0, inp_str)
+    primary = files[0] if files else (str(inp).strip() if inp else '')
+    return primary, files
 
 
 def derive_job_id(
-    *,
     case: str,
     work_dir: str | None = None,
     inp: str | None = None,
@@ -88,63 +106,39 @@ def derive_job_id(
         payload['work_dir'] = str(work_dir)
     if inp:
         payload['inp'] = str(inp)
-    if input_files:
-        payload['input_files'] = [str(path) for path in input_files if str(path)]
-
-    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
-    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]
-
-
-def _normalize_input_files(inp: str | None, input_files: list[str] | None) -> tuple[str, list[str]]:
-    files: list[str] = []
-    if inp:
-        files.append(inp)
-    if input_files:
-        for f in input_files:
-            if f and f not in files:
-                files.append(f)
-
-    if not files:
-        raise ValueError("At least one input file is required (use --inp and/or --input-file)")
-
-    return files[0], files
+    files = [str(f) for f in (input_files or []) if str(f).strip()]
+    if files:
+        payload['input_files'] = files
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
 
 
-def _normalize_extra_params(extra_params: str | None, extra_param_pairs: list[str] | None) -> str:
-    if extra_params and extra_param_pairs:
-        raise ValueError("Use either --extra-params or --extra-param, not both")
-
-    if extra_params is not None:
-        return str(extra_params)
-
-    out: dict[str, str] = {}
-    for pair in extra_param_pairs or []:
-        if "=" not in pair:
-            raise ValueError(f"Invalid --extra-param '{pair}', expected key=value")
-        key, value = pair.split("=", 1)
+def _normalize_extra_params(raw: str | None, pairs: list[str] | None = None) -> str:
+    items = [str(p).strip() for p in (pairs or []) if str(p).strip()]
+    if raw and items:
+        raise ValueError('Use either --extra-params or --extra-param, not both')
+    if raw:
+        return str(raw)
+    if not items:
+        return ''
+    data: dict[str, str] = {}
+    for item in items:
+        if '=' not in item:
+            raise ValueError(f"Invalid --extra-param '{item}', expected key=value")
+        key, value = item.split('=', 1)
         key = key.strip()
         if not key:
-            raise ValueError(f"Invalid --extra-param '{pair}', empty key")
-        out[key] = value
-
-    if not out:
-        return ''
-
-    return json.dumps(out, sort_keys=True, ensure_ascii=False)
+            raise ValueError(f"Invalid --extra-param '{item}', empty key")
+        data[key] = value.strip()
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
 
-def _validate_status(status: str) -> None:
-    if status not in ALLOWED_STATUS:
-        allowed = ', '.join(sorted(ALLOWED_STATUS))
-        raise ValueError(f"Invalid status '{status}'. Allowed: {allowed}")
-
-
-def _db_paths(db_path: str) -> tuple[Path, Path | None]:
-    requested = Path(db_path).expanduser()
-    if requested.suffix.lower() == '.csv':
-        sqlite_path = requested.with_suffix('.sqlite3')
-        return sqlite_path, requested
-    return requested, None
+def _validate_status(status: str) -> str:
+    normalized = str(status).strip().lower()
+    if normalized not in ALLOWED_STATUS:
+        choices = ', '.join(sorted(ALLOWED_STATUS))
+        raise ValueError(f'Invalid status {status!r}. Allowed: {choices}')
+    return normalized
 
 
 def _connect_db(db_path: str) -> tuple[sqlite3.Connection, str]:
@@ -158,6 +152,11 @@ def _connect_db(db_path: str) -> tuple[sqlite3.Connection, str]:
     if first_create and csv_path and csv_path.exists():
         _import_csv_into_conn(conn, csv_path)
     return conn, str(sqlite_path)
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f'PRAGMA table_info({table})').fetchall()
+    return {str(row[1]) for row in rows}
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -181,6 +180,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    columns = _table_columns(conn, 'sim_cases')
+    if 'note' not in columns:
+        conn.execute("ALTER TABLE sim_cases ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+        columns.add('note')
+    if 'notes' not in columns:
+        conn.execute("ALTER TABLE sim_cases ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        columns.add('notes')
+    if 'state_changed_at' not in columns:
+        conn.execute("ALTER TABLE sim_cases ADD COLUMN state_changed_at TEXT NOT NULL DEFAULT ''")
+        columns.add('state_changed_at')
+
+    conn.execute("UPDATE sim_cases SET note = COALESCE(NULLIF(note, ''), notes, '')")
+    conn.execute("UPDATE sim_cases SET notes = note WHERE notes != note")
+    conn.execute("UPDATE sim_cases SET state_changed_at = updated_at WHERE COALESCE(state_changed_at, '') = '' AND COALESCE(updated_at, '') != ''")
+
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sim_cases_job_id ON sim_cases(job_id)")
     conn.execute(
         """
@@ -215,7 +229,6 @@ def _import_csv_into_conn(conn: sqlite3.Connection, csv_path: Path) -> None:
                 continue
             for k in PREFERRED_FIELD_ORDER:
                 row.setdefault(k, '')
-            row['notes'] = row.get('notes') or row.get('note') or ''
             row['note'] = row.get('note') or row.get('notes') or ''
             row['job_id'] = row.get('job_id') or derive_job_id(
                 case=case,
@@ -240,14 +253,16 @@ def _import_csv_into_conn(conn: sqlite3.Connection, csv_path: Path) -> None:
                     str(row.get('extra_params', '')),
                     str(row.get('status', '')),
                     str(row.get('note', '')),
-                    str(row.get('notes', '')),
-                    str(row.get('state_changed_at', '')),
+                    str(row.get('note', '')),
+                    str(row.get('state_changed_at') or row.get('updated_at', '')),
                     str(row.get('created_at', '')),
                     str(row.get('updated_at', '')),
                     str(row.get('run_host', '')),
                 ),
             )
             for key, value in row.items():
+                if key in {'notes', 'state_changed_at'}:
+                    continue
                 if key in set(PREFERRED_FIELD_ORDER):
                     continue
                 if key and value is not None and str(value) != '':
@@ -260,6 +275,9 @@ def _import_csv_into_conn(conn: sqlite3.Connection, csv_path: Path) -> None:
 
 def _row_to_detail(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, str]:
     detail = {k: str(row[k] or '') for k in row.keys() if k != 'case'}
+    detail['note'] = detail.get('note', '') or detail.get('notes', '')
+    detail.pop('notes', None)
+    detail.pop('state_changed_at', None)
     extras = conn.execute(
         'SELECT field, value FROM sim_case_extra WHERE "case" = ? ORDER BY field',
         (row['case'],),
@@ -278,13 +296,21 @@ def _table_from_conn(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
 
 
 def _base_and_extra_fields(detail: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
-    base = {k: str(v) for k, v in detail.items() if k in set(CLI_FIELDS)}
-    extras = {k: str(v) for k, v in detail.items() if k not in set(CLI_FIELDS) and k != 'case'}
+    normalized = dict(detail)
+    if 'note' not in normalized and 'notes' in normalized:
+        normalized['note'] = normalized['notes']
+    base = {k: str(v) for k, v in normalized.items() if k in set(CLI_FIELDS)}
+    extras = {
+        k: str(v)
+        for k, v in normalized.items()
+        if k not in set(CLI_FIELDS) and k not in {'case', 'notes', 'state_changed_at'}
+    }
     return base, extras
 
 
 def _insert_full_case(conn: sqlite3.Connection, case: str, detail: Mapping[str, Any]) -> None:
     base, extras = _base_and_extra_fields(detail)
+    now = base.get('updated_at', '')
     conn.execute(
         """
         INSERT INTO sim_cases("case", work_dir, bin, inp, input_files, job_id, extra_params, status,
@@ -300,11 +326,11 @@ def _insert_full_case(conn: sqlite3.Connection, case: str, detail: Mapping[str, 
             base.get('job_id', ''),
             base.get('extra_params', ''),
             base.get('status', ''),
-            base.get('note', base.get('notes', '')),
-            base.get('notes', base.get('note', '')),
-            base.get('state_changed_at', ''),
+            base.get('note', ''),
+            base.get('note', ''),
+            now,
             base.get('created_at', ''),
-            base.get('updated_at', ''),
+            now,
             base.get('run_host', ''),
         ),
     )
@@ -364,10 +390,21 @@ def _pending_sync_rows(conn: sqlite3.Connection) -> list[dict[str, str]]:
 
 
 def _set_fields(conn: sqlite3.Connection, case: str, fields: Mapping[str, Any]) -> None:
-    base_fields = {k: str(v) for k, v in fields.items() if k in set(CLI_FIELDS)}
-    extras = {k: str(v) for k, v in fields.items() if k not in set(CLI_FIELDS) and k != 'case'}
+    normalized = dict(fields)
+    if 'note' not in normalized and 'notes' in normalized:
+        normalized['note'] = normalized['notes']
+    base_fields = {k: str(v) for k, v in normalized.items() if k in set(CLI_FIELDS)}
+    extras = {
+        k: str(v)
+        for k, v in normalized.items()
+        if k not in set(CLI_FIELDS) and k not in {'case', 'notes', 'state_changed_at'}
+    }
 
     if base_fields:
+        if 'note' in base_fields:
+            base_fields['notes'] = base_fields['note']
+        if 'updated_at' in base_fields:
+            base_fields['state_changed_at'] = base_fields['updated_at']
         cols = sorted(base_fields.keys())
         set_sql = ', '.join([f'"{c}" = ?' for c in cols])
         vals = [base_fields[c] for c in cols]
@@ -387,38 +424,36 @@ def _ensure_case_exists(conn: sqlite3.Connection, case: str, db_path: str) -> No
 
 
 def _read_sim_db(db_path: str) -> tuple[list[str], list[dict[str, str]]]:
-    conn, sqlite_path = _connect_db(db_path)
-    try:
-        table = _table_from_conn(conn)
-        fieldnames = _ordered_fieldnames(['case', *{k for v in table.values() for k in v.keys()}])
-        rows = [{'case': case, **detail} for case, detail in table.items()]
-        return fieldnames, rows
-    finally:
-        conn.close()
+    table = list_items(db_path)
+    fieldnames = _ordered_fieldnames(['case', *{k for v in table.values() for k in v.keys()}])
+    rows = [{'case': case, **detail} for case, detail in table.items()]
+    return fieldnames, rows
 
 
 def create_csv_db(fn_csv: str, dic: Mapping[str, Mapping[str, Any]]) -> None:
-    """Backward-compatible API name; creates SQLite DB from mapping."""
     sqlite_path, _ = _db_paths(fn_csv)
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     if sqlite_path.exists():
-        raise Exception(f'{sqlite_path} already created, you can add items!')
-
-    conn, sqlite_path_str = _connect_db(fn_csv)
+        sqlite_path.unlink()
+    conn = sqlite3.connect(str(sqlite_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys = ON')
     try:
+        _ensure_schema(conn)
+        now = _now_iso()
         for case, detail in dic.items():
-            now = _now_iso()
             values = {
                 'work_dir': str(detail.get('work_dir', detail.get('directory', ''))),
                 'bin': str(detail.get('bin', detail.get('exec_bin', ''))),
                 'inp': str(detail.get('inp', '')),
-                'input_files': _serialize_input_files(detail.get('input_files', []) if isinstance(detail.get('input_files'), list) else []),
+                'input_files': _serialize_input_files(
+                    detail.get('input_files') if isinstance(detail.get('input_files'), list) else _parse_input_files(detail.get('input_files'))
+                ),
+                'extra_params': str(detail.get('extra_params', '')),
                 'status': str(detail.get('status', '')),
                 'note': str(detail.get('note', detail.get('notes', ''))),
-                'notes': str(detail.get('notes', detail.get('note', ''))),
-                'state_changed_at': str(detail.get('state_changed_at', now)),
                 'created_at': str(detail.get('created_at', now)),
-                'updated_at': str(detail.get('updated_at', now)),
-                'extra_params': str(detail.get('extra_params', '')),
+                'updated_at': str(detail.get('updated_at', detail.get('state_changed_at', now))),
                 'run_host': str(detail.get('run_host', '')),
             }
             values['job_id'] = str(detail.get('job_id') or derive_job_id(case=case, work_dir=values['work_dir'] or None, inp=values['inp'] or None, input_files=_parse_input_files(values['input_files'])))
@@ -438,35 +473,38 @@ def create_csv_db(fn_csv: str, dic: Mapping[str, Mapping[str, Any]]) -> None:
                     values['extra_params'],
                     values['status'],
                     values['note'],
-                    values['notes'],
-                    values['state_changed_at'],
+                    values['note'],
+                    values['updated_at'],
                     values['created_at'],
                     values['updated_at'],
                     values['run_host'],
                 ),
             )
             for k, v in detail.items():
-                if k in {'case', 'directory', 'exec_bin', *CLI_FIELDS}:
+                if k in {'case', 'directory', 'exec_bin', 'notes', 'state_changed_at', *CLI_FIELDS}:
                     continue
-                conn.execute(
-                    'INSERT OR REPLACE INTO sim_case_extra("case", field, value) VALUES (?, ?, ?)',
-                    (case, str(k), str(v)),
-                )
+                if v is not None and str(v) != '':
+                    conn.execute(
+                        'INSERT OR REPLACE INTO sim_case_extra("case", field, value) VALUES (?, ?, ?)',
+                        (case, str(k), str(v)),
+                    )
         conn.commit()
     finally:
         conn.close()
-    print(f'mini sim database: {sqlite_path_str}, created! CREATE table')
 
 
 def add_cases(fn_csv: str, sim_cases: Mapping[str, Mapping[str, Any]]) -> None:
     conn, sqlite_path = _connect_db(fn_csv)
     try:
+        now = _now_iso()
         for case, detail in sim_cases.items():
             if conn.execute('SELECT 1 FROM sim_cases WHERE "case" = ?', (case,)).fetchone():
                 print(f'{case} already in db (key), skip')
                 continue
-            payload = {k: str(v) for k, v in detail.items()}
-            now = _now_iso()
+            payload = dict(detail)
+            payload['input_files'] = _serialize_input_files(
+                payload.get('input_files') if isinstance(payload.get('input_files'), list) else _parse_input_files(payload.get('input_files'))
+            )
             conn.execute(
                 """
                 INSERT INTO sim_cases("case", work_dir, bin, inp, input_files, job_id, extra_params, status,
@@ -475,23 +513,25 @@ def add_cases(fn_csv: str, sim_cases: Mapping[str, Mapping[str, Any]]) -> None:
                 """,
                 (
                     case,
-                    payload.get('work_dir', ''),
-                    payload.get('bin', ''),
+                    payload.get('work_dir', payload.get('directory', '')),
+                    payload.get('bin', payload.get('exec_bin', '')),
                     payload.get('inp', ''),
                     payload.get('input_files', ''),
-                    payload.get('job_id') or derive_job_id(case=case, work_dir=payload.get('work_dir') or None, inp=payload.get('inp') or None, input_files=_parse_input_files(payload.get('input_files'))),
+                    payload.get('job_id') or derive_job_id(case=case, work_dir=payload.get('work_dir') or payload.get('directory') or None, inp=payload.get('inp') or None, input_files=_parse_input_files(payload.get('input_files'))),
                     payload.get('extra_params', ''),
                     payload.get('status', ''),
                     payload.get('note', payload.get('notes', '')),
-                    payload.get('notes', payload.get('note', '')),
-                    payload.get('state_changed_at', now),
+                    payload.get('note', payload.get('notes', '')),
+                    payload.get('updated_at', payload.get('state_changed_at', now)),
                     payload.get('created_at', now),
-                    payload.get('updated_at', now),
+                    payload.get('updated_at', payload.get('state_changed_at', now)),
                     payload.get('run_host', ''),
                 ),
             )
             for key, value in payload.items():
-                if key not in set(CLI_FIELDS):
+                if key in {'directory', 'exec_bin', 'notes', 'state_changed_at', *CLI_FIELDS}:
+                    continue
+                if value is not None and str(value) != '':
                     conn.execute(
                         'INSERT OR REPLACE INTO sim_case_extra("case", field, value) VALUES (?, ?, ?)',
                         (case, key, value),
@@ -509,7 +549,13 @@ def add_case_info(fn_csv: str, new_info: str, case_val_d: Mapping[str, Any]) -> 
         for case, value in case_val_d.items():
             _ensure_case_exists(conn, case, fn_csv)
             if new_info in set(CLI_FIELDS):
-                conn.execute(f'UPDATE sim_cases SET "{new_info}" = ? WHERE "case" = ?', (str(value), case))
+                update_fields = {new_info: str(value)}
+                if new_info == 'note':
+                    update_fields['notes'] = str(value)
+                conn.execute(
+                    'UPDATE sim_cases SET ' + ', '.join([f'"{k}" = ?' for k in update_fields.keys()]) + ' WHERE "case" = ?',
+                    (*update_fields.values(), case),
+                )
             else:
                 conn.execute(
                     'INSERT OR REPLACE INTO sim_case_extra("case", field, value) VALUES (?, ?, ?)',
@@ -518,7 +564,6 @@ def add_case_info(fn_csv: str, new_info: str, case_val_d: Mapping[str, Any]) -> 
         conn.commit()
     finally:
         conn.close()
-    print(f"new info '{new_info}' added!")
 
 
 def upd_cases(fn_csv: str, sim_cases_new_info: Mapping[str, Mapping[str, Any]]) -> None:
@@ -555,41 +600,31 @@ def list_case_info(fn_csv: str) -> list[str]:
     conn, _ = _connect_db(fn_csv)
     try:
         rows = conn.execute("SELECT DISTINCT field FROM sim_case_extra ORDER BY field").fetchall()
-        cols = [c for c in CLI_FIELDS]
-        cols.extend(str(r['field']) for r in rows)
+        return [str(r['field']) for r in rows]
     finally:
         conn.close()
-    print(cols)
-    return cols
 
 
 def list_sim_db(fn_csv: str) -> dict[str, dict[str, str]]:
+    return list_items(fn_csv)
+
+
+def search_sim_db(fn_csv: str, query: str) -> list[str]:
+    m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*==\s*[\'\"](.*)[\'\"]\s*$', query)
+    if not m:
+        raise ValueError("Only simple equality queries are supported, for example: owner == 'alice'")
+    col, wanted = m.group(1), m.group(2)
     conn, _ = _connect_db(fn_csv)
     try:
-        table = _table_from_conn(conn)
-    finally:
-        conn.close()
-    print(table)
-    return table
-
-
-def search_sim_db(fn_csv: str, col_condition: str) -> list[str]:
-    conn, _ = _connect_db(fn_csv)
-    try:
-        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*==\s*'([^']*)'\s*$", col_condition)
-        if not m:
-            raise ValueError("Only simple conditions like status == 'DONE' are supported")
-
-        col, wanted = m.groups()
         if col in set(CLI_FIELDS) or col == 'case':
             rows = conn.execute(f'SELECT "case" FROM sim_cases WHERE "{col}" = ? ORDER BY "case"', (wanted,)).fetchall()
             return [str(r['case']) for r in rows]
         rows = conn.execute(
-            """
+            '''
             SELECT "case" FROM sim_case_extra
             WHERE field = ? AND value = ?
             ORDER BY "case"
-            """,
+            ''',
             (col, wanted),
         ).fetchall()
         return [str(r['case']) for r in rows]
@@ -604,23 +639,28 @@ def init_sim_db(db_path: str = DEFAULT_DB_PATH) -> None:
     print(f'Initialized database: {sqlite_path}')
 
 
-def resolve_case_ref(rows: list[dict[str, str]], case_or_job_id: str) -> str:
-    if any(row.get('case', '') == case_or_job_id for row in rows):
-        return case_or_job_id
+def resolve_case_ref(rows: list[dict[str, str]], *, case: str | None = None, job_id: str | None = None) -> str:
+    if case:
+        if any(row.get('case', '') == case for row in rows):
+            return case
+        raise ValueError(f'case not found: {case}')
+
+    if not job_id:
+        raise ValueError('either case or job_id is required')
 
     matches: list[str] = []
     for row in rows:
-        case = row.get('case', '')
-        if not case:
+        row_case = row.get('case', '')
+        if not row_case:
             continue
-        if row.get(JOB_ID_FIELD) == case_or_job_id:
-            matches.append(case)
+        if row.get(JOB_ID_FIELD) == job_id:
+            matches.append(row_case)
 
     if not matches:
-        raise ValueError(f"case/job_id not found: {case_or_job_id}")
+        raise ValueError(f'job_id not found: {job_id}')
     if len(matches) > 1:
         joined = ', '.join(sorted(matches))
-        raise ValueError(f"job_id matches multiple cases ({joined}), use case explicitly")
+        raise ValueError(f'job_id matches multiple cases ({joined})')
     return matches[0]
 
 
@@ -737,38 +777,69 @@ def _format_table(rows: list[dict[str, str]]) -> str:
 
 
 def _build_cli() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Mini simulation SQLite DB CLI')
+    parser = argparse.ArgumentParser(
+        description='Mini simulation SQLite DB CLI',
+        epilog=(
+            'Examples:\n'
+            '  ./sim_db init\n'
+            '  ./sim_db add --case case_001 --inp case_001.inp --bin solver --status start\n'
+            '  ./sim_db done --job-id <job_id>\n'
+            '  ./sim_db list --table\n'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest='command', required=True)
 
     p_init = sub.add_parser('init', help='Initialize DB file')
     p_init.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
 
-    p_add = sub.add_parser('add', help='Add simulation item')
-    p_add.add_argument('--case', required=True, help='Case name / unique key')
-    p_add.add_argument('--inp', default=None, help='Primary input file (convenience for single-input cases)')
-    p_add.add_argument('--input-file', action='append', default=[], help='Input file (repeatable)')
-    p_add.add_argument('--bin', dest='bin_name', required=True, help='Executable / binary name')
-    p_add.add_argument('--work-dir', '--wd', dest='work_dir', default=None, help='Working directory for this case (default: current dir)')
-    p_add.add_argument('--extra-param', action='append', default=[], help='Extra runtime parameter key=value (repeatable)')
-    p_add.add_argument('--extra-params', default=None, help='Raw extra runtime parameters string (for example JSON)')
-    p_add.add_argument('--status', required=True, help='start|restart|done')
-    p_add.add_argument('--note', default='', help='Optional short note/documentation text')
-    p_add.add_argument('--notes', dest='note', help='Backward-compatible alias of --note')
+    p_add = sub.add_parser(
+        'add',
+        help='Add simulation item',
+        description='Create a new simulation record. Case names must be unique. job_id is derived from case/work_dir/inp/input_files.',
+        epilog=(
+            'Examples:\n'
+            '  ./sim_db add --case case_001 --inp case_001.inp --bin solver --status start\n'
+            '  ./sim_db add --case case_002 --bin solver --input-file mesh.inp --input-file load.inp --status restart\n'
+            '  ./sim_db add --case case_003 --inp a.inp --bin solver --status start --work-dir /tmp/case_003 --note "baseline run"\n'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_add.add_argument('--case', required=True, help='Case name. Must be unique in the DB.')
+    p_add.add_argument('--inp', default=None, help='Primary input file. Convenience shortcut for the main input file.')
+    p_add.add_argument('--input-file', action='append', default=[], help='Input file path. Repeat to store multiple inputs.')
+    p_add.add_argument('--bin', dest='bin_name', required=True, help='Executable or solver binary name.')
+    p_add.add_argument('--work-dir', '--wd', dest='work_dir', default=None, help='Working directory for this job. Defaults to current directory.')
+    p_add.add_argument('--extra-param', action='append', default=[], help='Extra runtime parameter in key=value form. Repeatable.')
+    p_add.add_argument('--extra-params', default=None, help='Raw extra runtime parameters string, for example JSON.')
+    p_add.add_argument('--status', required=True, help='Initial status. Allowed: start, restart, done.')
+    p_add.add_argument('--note', default='', help='Optional short note for the job.')
+    p_add.add_argument('--notes', dest='note', help='Deprecated alias of --note kept for compatibility.')
     p_add.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
 
-    p_done = sub.add_parser('done', help='Mark case status as done')
+    p_done = sub.add_parser(
+        'done',
+        help='Mark a job as done',
+        description='Switch a job status to done. Prefer --job-id for unambiguous state changes.',
+        epilog=(
+            'Examples:\n'
+            '  ./sim_db done --job-id 0123abcd4567ef89\n'
+            '  ./sim_db done --case case_001\n'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     done_target = p_done.add_mutually_exclusive_group(required=True)
-    done_target.add_argument('--case', help='Case name / unique key')
-    done_target.add_argument('--job-id', dest='job_id', help='Stable job identifier')
+    done_target.add_argument('--case', help='Case name. Use when you know the exact case key.')
+    done_target.add_argument('--job-id', dest='job_id', help='Stable job identifier. Preferred for unambiguous state changes.')
     p_done.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
 
     p_list = sub.add_parser('list', help='List simulation items')
     p_list.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
-    p_list.add_argument('--status', default=None)
-    p_list.add_argument('--run-host', default=None)
-    p_list.add_argument('--sort-by', default='updated_at')
-    p_list.add_argument('--asc', action='store_true')
-    p_list.add_argument('--limit', type=int, default=None)
+    p_list.add_argument('--status', default=None, help='Filter by status.')
+    p_list.add_argument('--run-host', default=None, help='Filter by run_host.')
+    p_list.add_argument('--sort-by', default='updated_at', help='Sort key. Default: updated_at.')
+    p_list.add_argument('--asc', action='store_true', help='Sort ascending instead of descending.')
+    p_list.add_argument('--limit', type=int, default=None, help='Maximum number of rows to show.')
     p_list.add_argument('--table', action='store_true', help='Show compact table view (easy inspection)')
 
     p_import = sub.add_parser('import-csv', help='Import/merge rows from a legacy CSV file into SQLite DB')
@@ -950,10 +1021,8 @@ def main(argv: list[str] | None = None) -> int:
                 extra_params=_normalize_extra_params(args.extra_params, args.extra_param),
             )
         elif args.command == 'done':
-            target_case = args.case
-            if args.job_id:
-                _, rows = _read_sim_db(args.db)
-                target_case = resolve_case_ref(rows, args.job_id)
+            _, rows = _read_sim_db(args.db)
+            target_case = resolve_case_ref(rows, case=args.case, job_id=args.job_id)
             mark_done(case=target_case, db_path=args.db)
         elif args.command == 'list':
             rows = list_view(
