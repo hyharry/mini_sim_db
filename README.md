@@ -77,14 +77,6 @@ Examples:
 
 Sync merge policy is per `job_id`: newer `updated_at` wins.
 
-## REST transport
-
-```bash
-export SIM_DB_API_TOKEN='replace-me'
-python remote_api/server.py --host 127.0.0.1 --port 8765 --db ~/sim_db.csv
-python remote_api/client.py --url http://127.0.0.1:8765 --token "$SIM_DB_API_TOKEN" health
-```
-
 ## Tests
 
 ```bash
