@@ -10,16 +10,23 @@ Core storage is SQLite (`sim_db.py`). Remote host/client transport now lives in 
 ## Quick start (local CLI)
 
 ```bash
-python sim_db.py init
+./sim_db init
 
-python sim_db.py add \
+./sim_db add \
   --case case_001 \
   --inp case_001.inp \
   --bin solver \
   --status start
 
-python sim_db.py done --case case_001
-python sim_db.py list --table
+./sim_db done --case case_001
+./sim_db list --table
+```
+
+`sim_db.py` is now directly executable too, so both of these work:
+
+```bash
+./sim_db list --table
+./sim_db.py list --table
 ```
 
 ## Local-first sync workflow (JSON artifact)
