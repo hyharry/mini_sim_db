@@ -6,7 +6,7 @@ import subprocess
 import time
 import unittest
 
-from sim_db import add_sim_item, derive_job_id, find_items, import_csv, init_sim_db, list_items, list_view, mark_done, resolve_job_id, sync_export, sync_import, sync_status
+from sim_db import _view_payload, add_sim_item, derive_job_id, find_items, import_csv, init_sim_db, list_items, list_view, mark_done, mark_start, resolve_job_id, sync_export, sync_import, sync_status
 
 
 class TestSimpleCliFunctions(unittest.TestCase):
@@ -64,6 +64,19 @@ class TestSimpleCliFunctions(unittest.TestCase):
         with self.assertRaises(ValueError):
             add_sim_item(case='case002', inp='job.inp', bin_name='solver.bin', status='running', db_path=self.db_path)
 
+    def test_mark_start_and_view_payload(self):
+        init_sim_db(self.db_path)
+        add_sim_item(case='c3', inp='a.inp', bin_name='solver', status='done', db_path=self.db_path, note='n1')
+        row = list_view(self.db_path)[0]
+        mark_start(job_id=row['job_id'], db_path=self.db_path)
+        row_after = list_view(self.db_path)[0]
+        self.assertEqual(row_after['status'], 'start')
+        payload = _view_payload(self.db_path)
+        self.assertIn('rows', payload)
+        self.assertIn('columns', payload)
+        self.assertIn('status', payload['columns'])
+        self.assertEqual(payload['rows'][0]['job_id'], row['job_id'])
+
     def test_csv_import(self):
         csv_file = os.path.join(self.tmp_dir.name, 'legacy.csv')
         with open(csv_file, 'w', encoding='utf-8') as f:
@@ -104,6 +117,11 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertEqual(found.returncode, 0)
         self.assertIn('Wing_Load', found.stdout)
 
+    def test_cli_view_help(self):
+        r = self._run('view', '--help')
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('--no-open', r.stdout)
+
     def test_cli_done_by_job_id(self):
         self.assertEqual(self._run('init').returncode, 0)
         self.assertEqual(self._run('add', '--case', 'c2', '--inp', 'a.inp', '--bin', 'solver', '--status', 'start').returncode, 0)
@@ -140,7 +158,8 @@ class TestLocalSync(unittest.TestCase):
         self.assertEqual(status_before['pending_cases'], 1)
         out = sync_export(self.db_path, self.sync_file)
         self.assertEqual(out['exported'], 1)
-        payload = json.load(open(self.sync_file, 'r', encoding='utf-8'))
+        with open(self.sync_file, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
         self.assertEqual(payload['count'], 1)
         imported = sync_import(self.db_path, self.sync_file)
         self.assertEqual(imported['skipped'], 1)
