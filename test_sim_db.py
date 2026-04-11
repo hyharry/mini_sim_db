@@ -6,7 +6,7 @@ import subprocess
 import time
 import unittest
 
-from sim_db import add_sim_item, derive_job_id, import_csv, init_sim_db, list_items, list_view, mark_done, resolve_job_id, sync_export, sync_import, sync_status
+from sim_db import add_sim_item, derive_job_id, find_items, import_csv, init_sim_db, list_items, list_view, mark_done, resolve_job_id, sync_export, sync_import, sync_status
 
 
 class TestSimpleCliFunctions(unittest.TestCase):
@@ -45,6 +45,20 @@ class TestSimpleCliFunctions(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_job_id(rows, case='dup')
 
+
+    def test_find_items_case_insensitive_and_wildcard(self):
+        init_sim_db(self.db_path)
+        add_sim_item(case='Wing_Load', inp='mesh_A.inp', bin_name='solver', status='start', db_path=self.db_path, work_dir='/tmp/Project_A/run01', note='Baseline')
+        add_sim_item(case='Tail_Load', inp='mesh_B.inp', bin_name='solver', status='restart', db_path=self.db_path, work_dir='/tmp/Project_B/run02', note='Follow up')
+        rows = find_items(self.db_path, text='wing')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['case'], 'Wing_Load')
+        rows2 = find_items(self.db_path, case='*load', work_dir='project_a')
+        self.assertEqual(len(rows2), 1)
+        self.assertEqual(rows2[0]['case'], 'Wing_Load')
+        rows3 = find_items(self.db_path, input_file='mesh_a', note='base')
+        self.assertEqual(len(rows3), 1)
+
     def test_status_validation(self):
         init_sim_db(self.db_path)
         with self.assertRaises(ValueError):
@@ -81,6 +95,14 @@ class TestCliSubprocess(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn('Examples:', r.stdout)
         self.assertIn('./sim_db done --job-id', r.stdout)
+
+
+    def test_cli_find(self):
+        self.assertEqual(self._run('init').returncode, 0)
+        self.assertEqual(self._run('add', '--case', 'Wing_Load', '--inp', 'mesh_A.inp', '--bin', 'solver', '--status', 'start', '--work-dir', '/tmp/Project_A', '--note', 'Baseline').returncode, 0)
+        found = self._run('find', '--text', 'wing', '--work-dir', 'project_a', '--table')
+        self.assertEqual(found.returncode, 0)
+        self.assertIn('Wing_Load', found.stdout)
 
     def test_cli_done_by_job_id(self):
         self.assertEqual(self._run('init').returncode, 0)

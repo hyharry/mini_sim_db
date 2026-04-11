@@ -47,6 +47,26 @@ Use `./sim_db add --help` for full help and examples.
 - `--case` only works when it resolves to exactly one row
 - if multiple rows share the same case label, the CLI tells you to use `--job-id`
 
+
+## Search
+
+A new `find` command is available for case-insensitive search.
+
+Rules:
+- bare text is treated like `*text*` automatically
+- `*` works as a wildcard
+- multiple filters combine with AND
+
+Examples:
+
+```bash
+./sim_db find --text wing
+./sim_db find --case wing --work-dir project_a
+./sim_db find --input-file mesh --note baseline
+```
+
+`--text` searches across: `case`, `work_dir`, `inp`, `input_files`, `note`, and `bin`.
+
 ## Sync
 
 ```bash

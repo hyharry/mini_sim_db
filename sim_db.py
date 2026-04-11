@@ -254,6 +254,62 @@ def list_view(db_path: str = DEFAULT_DB_PATH, status: str | None = None, run_hos
     return rows
 
 
+def _wildcard_to_regex(pattern: str) -> str:
+    escaped = re.escape(pattern)
+    return '^' + escaped.replace('\*', '.*') + '$'
+
+
+def _matches_pattern(value: str, pattern: str) -> bool:
+    value = str(value or '')
+    pattern = str(pattern or '').strip()
+    if not pattern:
+        return True
+    if '*' not in pattern:
+        pattern = f'*{pattern}*'
+    return re.match(_wildcard_to_regex(pattern), value, flags=re.IGNORECASE) is not None
+
+
+def find_items(
+    db_path: str = DEFAULT_DB_PATH,
+    text: str | None = None,
+    case: str | None = None,
+    work_dir: str | None = None,
+    inp: str | None = None,
+    input_file: str | None = None,
+    note: str | None = None,
+    bin_name: str | None = None,
+    status: str | None = None,
+    run_host: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, str]]:
+    rows = list_view(db_path=db_path, status=None, run_host=None, sort_by='updated_at', desc=True, limit=None)
+    out: list[dict[str, str]] = []
+    for row in rows:
+        haystacks = [row.get('case', ''), row.get('work_dir', ''), row.get('inp', ''), row.get('input_files', ''), row.get('note', ''), row.get('bin', '')]
+        if text and not any(_matches_pattern(h, text) for h in haystacks):
+            continue
+        if case and not _matches_pattern(row.get('case', ''), case):
+            continue
+        if work_dir and not _matches_pattern(row.get('work_dir', ''), work_dir):
+            continue
+        if inp and not _matches_pattern(row.get('inp', ''), inp):
+            continue
+        if input_file and not _matches_pattern(row.get('input_files', ''), input_file):
+            continue
+        if note and not _matches_pattern(row.get('note', ''), note):
+            continue
+        if bin_name and not _matches_pattern(row.get('bin', ''), bin_name):
+            continue
+        if status and not _matches_pattern(row.get('status', ''), status):
+            continue
+        if run_host and not _matches_pattern(row.get('run_host', ''), run_host):
+            continue
+        out.append(row)
+    if limit is not None:
+        out = out[: max(0, limit)]
+    return out
+
+
 def list_sim_db(fn_csv: str) -> dict[str, dict[str, str]]:
     return list_items(fn_csv)
 
@@ -675,6 +731,32 @@ def _build_cli() -> argparse.ArgumentParser:
     p_list.add_argument('--limit', type=int, default=None, help='Maximum number of rows to show.')
     p_list.add_argument('--table', action='store_true', help='Show compact table view (easy inspection)')
 
+
+    p_find = sub.add_parser(
+        'find',
+        help='Search simulation items',
+        description='Case-insensitive search across rows. Bare text is treated like *text* automatically.',
+        epilog=(
+            'Examples:\n'
+            '  ./sim_db find --text wing\n'
+            '  ./sim_db find --case wing --work-dir project_a\n'
+            '  ./sim_db find --input-file mesh --note baseline\n'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_find.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
+    p_find.add_argument('--text', default=None, help='General text search across case/work_dir/inp/input_files/note/bin. Case-insensitive.')
+    p_find.add_argument('--case', dest='find_case', default=None, help='Case filter. Bare text behaves like *text*.')
+    p_find.add_argument('--work-dir', dest='find_work_dir', default=None, help='Work dir filter. Bare text behaves like *text*.')
+    p_find.add_argument('--inp', dest='find_inp', default=None, help='Primary inp filter. Bare text behaves like *text*.')
+    p_find.add_argument('--input-file', dest='find_input_file', default=None, help='Input-files filter. Bare text behaves like *text*.')
+    p_find.add_argument('--note', dest='find_note', default=None, help='Note filter. Bare text behaves like *text*.')
+    p_find.add_argument('--bin', dest='find_bin', default=None, help='Binary filter. Bare text behaves like *text*.')
+    p_find.add_argument('--status', dest='find_status', default=None, help='Status filter. Bare text behaves like *text*.')
+    p_find.add_argument('--run-host', dest='find_run_host', default=None, help='Run host filter. Bare text behaves like *text*.')
+    p_find.add_argument('--limit', type=int, default=None, help='Maximum number of rows to show.')
+    p_find.add_argument('--table', action='store_true', help='Show compact table view.')
+
     p_import = sub.add_parser('import-csv', help='Import/merge rows from a legacy CSV file into SQLite DB')
     p_import.add_argument('--csv', required=True, help='Path to legacy CSV file')
     p_import.add_argument('--db', default=DEFAULT_DB_PATH, help='Target DB path (CSV path auto-maps to SQLite)')
@@ -708,6 +790,29 @@ def main(argv: list[str] | None = None) -> int:
             mark_done(job_id=target_job_id, db_path=args.db)
         elif args.command == 'list':
             rows = list_view(db_path=args.db, status=args.status, run_host=args.run_host, sort_by=args.sort_by, desc=not args.asc, limit=args.limit)
+            if not rows:
+                print('(empty)')
+            elif args.table:
+                print(_format_table(rows))
+            else:
+                for row in rows:
+                    case = row.get('case', '')
+                    detail = {k: v for k, v in row.items() if k != 'case'}
+                    print(f'{case}: {detail}')
+        elif args.command == 'find':
+            rows = find_items(
+                db_path=args.db,
+                text=args.text,
+                case=args.find_case,
+                work_dir=args.find_work_dir,
+                inp=args.find_inp,
+                input_file=args.find_input_file,
+                note=args.find_note,
+                bin_name=args.find_bin,
+                status=args.find_status,
+                run_host=args.find_run_host,
+                limit=args.limit,
+            )
             if not rows:
                 print('(empty)')
             elif args.table:
