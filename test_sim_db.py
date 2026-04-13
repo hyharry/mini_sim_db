@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import sys
 import tempfile
 import subprocess
@@ -28,6 +29,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
         self.assertEqual(row['input_files'], 'job.inp;mesh.inp')
         self.assertEqual(row['note'], 'from test')
         self.assertEqual(row['job_id'], derive_job_id(case='case001', work_dir='/tmp/case001', inp='job.inp', input_files=['job.inp', 'mesh.inp']))
+        self.assertEqual(row['run_host'], socket.gethostname())
         before = row['updated_at']
         time.sleep(1)
         mark_done(job_id=row['job_id'], db_path=self.db_path)
