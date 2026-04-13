@@ -41,7 +41,18 @@ PREFERRED_FIELD_ORDER = ['case', *CLI_FIELDS]
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat(timespec='milliseconds')
+    return datetime.now().isoformat(timespec='seconds')
+
+
+def _display_timestamp(value: str) -> str:
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    return parsed.isoformat(sep=' ', timespec='seconds')
 
 
 def _ordered_fieldnames(fieldnames: list[str]) -> list[str]:
@@ -944,14 +955,20 @@ def sync_pull(db_path: str, remote: str) -> dict[str, Any]:
 
 
 def _format_table(rows: list[dict[str, str]]) -> str:
-    cols = ['case', 'status', 'job_id', 'bin', 'inp', 'updated_at', 'run_host', 'note']
-    widths = {c: len(c) for c in cols}
+    cols = ['job_id', 'run_host', 'case', 'status', 'bin', 'inp', 'created_at', 'updated_at', 'note']
+    formatted_rows: list[dict[str, str]] = []
     for row in rows:
+        formatted = dict(row)
+        formatted['created_at'] = _display_timestamp(formatted.get('created_at', ''))
+        formatted['updated_at'] = _display_timestamp(formatted.get('updated_at', ''))
+        formatted_rows.append(formatted)
+    widths = {c: len(c) for c in cols}
+    for row in formatted_rows:
         for c in cols:
             widths[c] = min(64, max(widths[c], len(str(row.get(c, '')))))
     header = ' | '.join(c.ljust(widths[c]) for c in cols)
     line = '-+-'.join('-' * widths[c] for c in cols)
-    body = [' | '.join(str(row.get(c, '')).ljust(widths[c])[:widths[c]] for c in cols) for row in rows]
+    body = [' | '.join(str(row.get(c, '')).ljust(widths[c])[:widths[c]] for c in cols) for row in formatted_rows]
     return '\n'.join([header, line, *body])
 
 

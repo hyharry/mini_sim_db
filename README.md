@@ -30,7 +30,7 @@ Core storage is SQLite via `sim_db.py`.
 
 ```bash
 ./sim_db add --help
-./sim_db list --table
+./sim_db list --table   # table starts with job_id, run_host, ... and shows second-level timestamps
 ./sim_db find --text wing
 ./sim_db done --job-id <job_id>
 ./sim_db push /path/to/remote.sqlite3

@@ -6,7 +6,7 @@ import subprocess
 import time
 import unittest
 
-from sim_db import _view_payload, add_sim_item, derive_job_id, find_items, import_csv, init_sim_db, list_items, list_view, mark_done, mark_start, resolve_job_id, sync_export, sync_import, sync_pull, sync_push, sync_status
+from sim_db import _format_table, _view_payload, add_sim_item, derive_job_id, find_items, import_csv, init_sim_db, list_items, list_view, mark_done, mark_start, resolve_job_id, sync_export, sync_import, sync_pull, sync_push, sync_status
 
 
 class TestSimpleCliFunctions(unittest.TestCase):
@@ -76,6 +76,21 @@ class TestSimpleCliFunctions(unittest.TestCase):
         self.assertIn('columns', payload)
         self.assertIn('status', payload['columns'])
         self.assertEqual(payload['rows'][0]['job_id'], row['job_id'])
+
+    def test_table_format_prefers_job_id_and_human_timestamps(self):
+        init_sim_db(self.db_path)
+        add_sim_item(case='fmt', inp='job.inp', bin_name='solver', status='start', db_path=self.db_path, note='hello', work_dir='/tmp/fmt')
+        row = list_view(self.db_path)[0]
+        rendered = _format_table([row])
+        lines = rendered.splitlines()
+        self.assertTrue(lines[0].startswith('job_id'))
+        self.assertIn('run_host', lines[0])
+        self.assertIn('created_at', lines[0])
+        self.assertIn('updated_at', lines[0])
+        self.assertTrue(lines[2].startswith(row['job_id']))
+        self.assertIn('2026-', lines[2])
+        self.assertRegex(row['created_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$')
+        self.assertRegex(row['updated_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$')
 
     def test_csv_import(self):
         csv_file = os.path.join(self.tmp_dir.name, 'legacy.csv')
