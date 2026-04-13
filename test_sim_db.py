@@ -141,11 +141,10 @@ class TestCliSubprocess(unittest.TestCase):
 
     def test_cli_done_by_job_id(self):
         self.assertEqual(self._run('init').returncode, 0)
-        self.assertEqual(self._run('add', '--case', 'c2', '--inp', 'a.inp', '--bin', 'solver', '--status', 'start').returncode, 0)
-        listed = self._run('list')
-        self.assertEqual(listed.returncode, 0)
-        marker = "'job_id': '"
-        job_id = listed.stdout.split(marker, 1)[1].split("'", 1)[0]
+        added = self._run('add', '--case', 'c2', '--inp', 'a.inp', '--bin', 'solver', '--status', 'start')
+        self.assertEqual(added.returncode, 0)
+        self.assertIn('job_id=', added.stdout)
+        job_id = added.stdout.split('job_id=', 1)[1].split(')', 1)[0]
         done = self._run('done', '--job-id', job_id)
         self.assertEqual(done.returncode, 0)
         self.assertIn('marked as done', done.stdout)

@@ -390,7 +390,7 @@ def add_sim_item(case: str, inp: str | None, bin_name: str, status: str, db_path
         conn.commit()
     finally:
         conn.close()
-    print(f"Added case '{case}' with status '{status}'")
+    print(f"Added case '{case}' with status '{status}' (job_id={job_id})")
 
 
 def upd_case_by_job_id(db_path: str, job_id: str, fields: Mapping[str, Any]) -> None:
