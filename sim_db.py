@@ -9,8 +9,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -37,7 +39,9 @@ CLI_FIELDS = [
     'updated_at',
     'run_host',
 ]
-PREFERRED_FIELD_ORDER = ['case', *CLI_FIELDS]
+PREFERRED_FIELD_ORDER = ['job_id', 'run_host', 'case', 'work_dir', 
+                         'bin', 'inp', 'input_files', 'extra_params', 
+                         'status', 'note', 'created_at', 'updated_at']
 
 
 def _now_iso() -> str:
@@ -272,7 +276,7 @@ def list_view(db_path: str = DEFAULT_DB_PATH, status: str | None = None, run_hos
 
 def _wildcard_to_regex(pattern: str) -> str:
     escaped = re.escape(pattern)
-    return '^' + escaped.replace('\*', '.*') + '$'
+    return '^' + escaped.replace(r'\*', '.*') + '$'
 
 
 def _matches_pattern(value: str, pattern: str) -> bool:
@@ -924,38 +928,138 @@ def run_local_view(db_path: str, host: str = '127.0.0.1', port: int = 8765, open
         server.server_close()
 
 
+def _is_ssh_remote(path: str) -> bool:
+    """Check if path is an SSH remote (user@host:/path/to/file)"""
+    return '@' in path and ':' in path and not path.startswith('/')
+
+
+def _scp_transfer(source: str, dest: str) -> None:
+    """Transfer file via SCP. Source or dest can be remote (user@host:/path)."""
+    if not shutil.which('scp'):
+        raise RuntimeError('scp command not found. Please install openssh-client.')
+    result = subprocess.run(['scp', source, dest], capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f'SCP failed: {result.stderr}')
+
+
+def _ssh_remote_db_path(remote: str) -> str:
+    """Get the SQLite path for a remote. Applies _db_paths rules remotely."""
+    if ':' not in remote:
+        raise ValueError(f'Invalid SSH remote: {remote}')
+    host_part, path_part = remote.rsplit(':', 1)
+    expanded = Path(path_part).expanduser()
+    if expanded.suffix.lower() == '.csv':
+        db_path = expanded.with_suffix('.sqlite3')
+    else:
+        db_path = expanded.with_suffix('.sqlite3')
+    return f'{host_part}:{str(db_path)}'
+
+
 def sync_push(db_path: str, remote: str) -> dict[str, Any]:
-    remote_db = os.path.expanduser(remote)
-    with tempfile.NamedTemporaryFile(prefix='mini_sim_db_push_', suffix='.json', delete=False) as tmp:
-        artifact_path = tmp.name
-    try:
-        sync_export(db_path, artifact_path, include_all=True, mark_synced=False)
-        out = sync_import(remote_db, artifact_path)
-        sync_export(db_path, artifact_path, include_all=False, mark_synced=True)
-        out['remote'] = remote_db
-        out['direction'] = 'push'
-        return out
-    finally:
-        Path(artifact_path).unlink(missing_ok=True)
+    local_sqlite, _ = _db_paths(db_path)
+    is_ssh = _is_ssh_remote(remote)
+    
+    if is_ssh:
+        # SSH mode: direct database transfer
+        remote_sqlite = _ssh_remote_db_path(remote)
+        with tempfile.NamedTemporaryFile(prefix='mini_sim_db_push_', suffix='.sqlite3', delete=False) as tmp:
+            temp_remote_db = tmp.name
+        try:
+            # Download remote DB, merge our changes, upload back
+            try:
+                _scp_transfer(remote_sqlite, temp_remote_db)
+                remote_exists = True
+            except RuntimeError:
+                # Remote DB doesn't exist yet, create empty one
+                conn = sqlite3.connect(temp_remote_db)
+                _ensure_schema(conn)
+                conn.close()
+                remote_exists = False
+            
+            # Merge: import remote into temp, then export local into temp, then upload
+            temp_conn = sqlite3.connect(temp_remote_db)
+            temp_conn.close()
+            
+            # Copy local to temp for merging
+            with tempfile.NamedTemporaryFile(prefix='mini_sim_db_push_local_', suffix='.json', delete=False) as tmp_json:
+                artifact_path = tmp_json.name
+            try:
+                sync_export(db_path, artifact_path, include_all=True, mark_synced=False)
+                sync_import(temp_remote_db, artifact_path)
+                # Upload merged DB back to remote
+                _scp_transfer(temp_remote_db, remote_sqlite)
+                # Mark as synced locally
+                sync_export(db_path, artifact_path, include_all=False, mark_synced=True)
+                return {'ok': True, 'remote': remote, 'direction': 'push', 'method': 'ssh', 'message': 'Pushed via SSH'}
+            finally:
+                Path(artifact_path).unlink(missing_ok=True)
+        finally:
+            Path(temp_remote_db).unlink(missing_ok=True)
+    else:
+        # Local mode: original behavior
+        remote_db = os.path.expanduser(remote)
+        with tempfile.NamedTemporaryFile(prefix='mini_sim_db_push_', suffix='.json', delete=False) as tmp:
+            artifact_path = tmp.name
+        try:
+            sync_export(db_path, artifact_path, include_all=True, mark_synced=False)
+            out = sync_import(remote_db, artifact_path)
+            sync_export(db_path, artifact_path, include_all=False, mark_synced=True)
+            out['remote'] = remote_db
+            out['direction'] = 'push'
+            return out
+        finally:
+            Path(artifact_path).unlink(missing_ok=True)
 
 
 def sync_pull(db_path: str, remote: str) -> dict[str, Any]:
-    remote_db = os.path.expanduser(remote)
-    with tempfile.NamedTemporaryFile(prefix='mini_sim_db_pull_', suffix='.json', delete=False) as tmp:
-        artifact_path = tmp.name
-    try:
-        sync_export(remote_db, artifact_path, include_all=True, mark_synced=False)
-        out = sync_import(db_path, artifact_path)
-        sync_export(remote_db, artifact_path, include_all=False, mark_synced=True)
-        out['remote'] = remote_db
-        out['direction'] = 'pull'
-        return out
-    finally:
-        Path(artifact_path).unlink(missing_ok=True)
+    is_ssh = _is_ssh_remote(remote)
+    
+    if is_ssh:
+        # SSH mode: direct database transfer
+        remote_sqlite = _ssh_remote_db_path(remote)
+        with tempfile.NamedTemporaryFile(prefix='mini_sim_db_pull_', suffix='.sqlite3', delete=False) as tmp:
+            temp_remote_db = tmp.name
+        try:
+            # Download remote DB
+            _scp_transfer(remote_sqlite, temp_remote_db)
+            
+            # Import remote data into local DB
+            with tempfile.NamedTemporaryFile(prefix='mini_sim_db_pull_', suffix='.json', delete=False) as tmp_json:
+                artifact_path = tmp_json.name
+            try:
+                sync_export(temp_remote_db, artifact_path, include_all=True, mark_synced=False)
+                out = sync_import(db_path, artifact_path)
+                
+                # Mark remote as synced by uploading back with updated state
+                sync_export(temp_remote_db, artifact_path, include_all=False, mark_synced=True)
+                _scp_transfer(temp_remote_db, remote_sqlite)
+                
+                out['remote'] = remote
+                out['direction'] = 'pull'
+                out['method'] = 'ssh'
+                return out
+            finally:
+                Path(artifact_path).unlink(missing_ok=True)
+        finally:
+            Path(temp_remote_db).unlink(missing_ok=True)
+    else:
+        # Local mode: original behavior
+        remote_db = os.path.expanduser(remote)
+        with tempfile.NamedTemporaryFile(prefix='mini_sim_db_pull_', suffix='.json', delete=False) as tmp:
+            artifact_path = tmp.name
+        try:
+            sync_export(remote_db, artifact_path, include_all=True, mark_synced=False)
+            out = sync_import(db_path, artifact_path)
+            sync_export(remote_db, artifact_path, include_all=False, mark_synced=True)
+            out['remote'] = remote_db
+            out['direction'] = 'pull'
+            return out
+        finally:
+            Path(artifact_path).unlink(missing_ok=True)
 
 
 def _format_table(rows: list[dict[str, str]]) -> str:
-    cols = ['job_id', 'run_host', 'case', 'status', 'bin', 'inp', 'created_at', 'updated_at', 'note']
+    cols = ['job_id', 'run_host', 'case', 'work_dir', 'bin', 'inp', 'input_files', 'extra_params', 'status', 'note', 'created_at', 'updated_at']
     formatted_rows: list[dict[str, str]] = []
     for row in rows:
         formatted = dict(row)
@@ -1088,12 +1192,12 @@ def _build_cli() -> argparse.ArgumentParser:
     p_sync_import.add_argument('--in', dest='in_path', required=True, help='Input JSON file path')
     p_sync_import.add_argument('--db', default=DEFAULT_DB_PATH, help='Path to DB (CSV path auto-maps to SQLite)')
 
-    p_push = sub.add_parser('push', help='Push local updates to a remote DB path')
-    p_push.add_argument('remote', help='Remote DB path (for example /shared/remote.sqlite3)')
+    p_push = sub.add_parser('push', help='Push local updates to a remote DB path', description='Push local changes to a remote database. Supports local paths and SSH remotes (user@host:/path).')
+    p_push.add_argument('remote', help='Remote DB path. Examples: /shared/remote.sqlite3 or user@server:/data/sim.sqlite3')
     p_push.add_argument('--db', default=DEFAULT_DB_PATH, help='Local DB path (CSV path auto-maps to SQLite)')
 
-    p_pull = sub.add_parser('pull', help='Pull updates from a remote DB path into local DB')
-    p_pull.add_argument('remote', help='Remote DB path (for example /shared/remote.sqlite3)')
+    p_pull = sub.add_parser('pull', help='Pull updates from a remote DB path into local DB', description='Pull changes from a remote database. Supports local paths and SSH remotes (user@host:/path).')
+    p_pull.add_argument('remote', help='Remote DB path. Examples: /shared/remote.sqlite3 or user@server:/data/sim.sqlite3')
     p_pull.add_argument('--db', default=DEFAULT_DB_PATH, help='Local DB path (CSV path auto-maps to SQLite)')
     return parser
 
