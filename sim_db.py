@@ -386,7 +386,7 @@ def add_sim_item(case: str, inp: str | None, bin_name: str, status: str, db_path
         job_id = derive_job_id(case=case, work_dir=resolved_work_dir, inp=primary_inp, input_files=files)
         conn.execute(
             '''
-            INSERT INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, extra_params, status, note, created_at, updated_at, run_host)
+            INSERT OR REPLACE INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, extra_params, status, note, created_at, updated_at, run_host)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (job_id, case, resolved_work_dir, bin_name, primary_inp, _serialize_input_files(files), str(extra_params or ''), status, note_value, now, now, socket.gethostname()),
