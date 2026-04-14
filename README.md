@@ -7,9 +7,8 @@ Core storage is SQLite via `sim_db.py`.
 ## Essentials
 
 - `job_id` is the real row identity / primary key
-- `case` is a label and may appear on multiple rows
 - local CLI workflow is the core path
-- sync is supported for moving updates between DBs
+- sync is supported for moving updates between (local/remote) DBs
 
 ## Quick start
 
@@ -30,11 +29,11 @@ Core storage is SQLite via `sim_db.py`.
 
 ```bash
 ./sim_db add --help
-./sim_db list --table   # table starts with job_id, run_host, ... and shows second-level timestamps
+./sim_db list --table
 ./sim_db find --text wing
 ./sim_db done --job-id <job_id>
-./sim_db push /path/to/remote.sqlite3
-./sim_db pull /path/to/remote.sqlite3
+./sim_db push /path/to/remote.sqlite3 (or username@remote)
+./sim_db pull /path/to/remote.sqlite3 (or username@remote)
 ```
 
 ## Notes

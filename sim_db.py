@@ -929,8 +929,8 @@ def run_local_view(db_path: str, host: str = '127.0.0.1', port: int = 8765, open
 
 
 def _is_ssh_remote(path: str) -> bool:
-    """Check if path is an SSH remote (user@host:/path/to/file)"""
-    return '@' in path and ':' in path and not path.startswith('/')
+    """Check if path is an SSH remote (user@host or user@host:/path/to/file)"""
+    return '@' in path and not path.startswith('/')
 
 
 def _scp_transfer(source: str, dest: str) -> None:
@@ -944,9 +944,17 @@ def _scp_transfer(source: str, dest: str) -> None:
 
 def _ssh_remote_db_path(remote: str) -> str:
     """Get the SQLite path for a remote. Applies _db_paths rules remotely."""
+    # Handle both 'user@host' and 'user@host:/path/to/file' formats
     if ':' not in remote:
-        raise ValueError(f'Invalid SSH remote: {remote}')
+        # Just hostname provided, use default sim_db.sqlite3
+        return f'{remote}:sim_db.sqlite3'
+    
     host_part, path_part = remote.rsplit(':', 1)
+    
+    # Handle case where path_part is empty (user@host:)
+    if not path_part or path_part.strip() == '':
+        return f'{host_part}:sim_db.sqlite3'
+    
     expanded = Path(path_part).expanduser()
     if expanded.suffix.lower() == '.csv':
         db_path = expanded.with_suffix('.sqlite3')
@@ -985,12 +993,18 @@ def sync_push(db_path: str, remote: str) -> dict[str, Any]:
                 artifact_path = tmp_json.name
             try:
                 sync_export(db_path, artifact_path, include_all=True, mark_synced=False)
-                sync_import(temp_remote_db, artifact_path)
-                # Upload merged DB back to remote
+                out = sync_import(temp_remote_db, artifact_path)
+                
+                # Mark all remote items as synced by exporting all with mark_synced=True before uploading
+                sync_export(temp_remote_db, artifact_path, include_all=True, mark_synced=True)
                 _scp_transfer(temp_remote_db, remote_sqlite)
+                
                 # Mark as synced locally
                 sync_export(db_path, artifact_path, include_all=False, mark_synced=True)
-                return {'ok': True, 'remote': remote, 'direction': 'push', 'method': 'ssh', 'message': 'Pushed via SSH'}
+                out['remote'] = remote
+                out['direction'] = 'push'
+                out['method'] = 'ssh'
+                return out
             finally:
                 Path(artifact_path).unlink(missing_ok=True)
         finally:
@@ -1030,8 +1044,8 @@ def sync_pull(db_path: str, remote: str) -> dict[str, Any]:
                 sync_export(temp_remote_db, artifact_path, include_all=True, mark_synced=False)
                 out = sync_import(db_path, artifact_path)
                 
-                # Mark remote as synced by uploading back with updated state
-                sync_export(temp_remote_db, artifact_path, include_all=False, mark_synced=True)
+                # Mark all remote items as synced by exporting all with mark_synced=True before uploading
+                sync_export(temp_remote_db, artifact_path, include_all=True, mark_synced=True)
                 _scp_transfer(temp_remote_db, remote_sqlite)
                 
                 out['remote'] = remote
