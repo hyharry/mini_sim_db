@@ -20,7 +20,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
 
     def test_init_add_done_list(self):
         init_sim_db(self.db_path)
-        add_sim_item(case='case001', inp='job.inp', input_files=['job.inp', 'mesh.inp'], bin_name='solver.bin', status='start', db_path=self.db_path, note='from test', work_dir='/tmp/case001', extra_params='{"alpha": 1}')
+        add_sim_item(case='case001', inp='job.inp', input_files=['job.inp', 'mesh.inp'], bin_name='solver.bin', status='start', db_path=self.db_path, note='from test', work_dir='/tmp/case001', output='result/case001.out', extra_params='{"alpha": 1}')
         table = list_items(self.db_path)
         self.assertEqual(len(table), 1)
         row = next(iter(table.values()))
@@ -28,6 +28,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
         self.assertEqual(row['status'], 'start')
         self.assertEqual(row['input_files'], 'job.inp;mesh.inp')
         self.assertEqual(row['note'], 'from test')
+        self.assertEqual(row['output'], 'result/case001.out')
         self.assertEqual(row['job_id'], derive_job_id(case='case001', work_dir='/tmp/case001', inp='job.inp', input_files=['job.inp', 'mesh.inp']))
         self.assertEqual(row['run_host'], socket.gethostname())
         before = row['updated_at']
@@ -87,6 +88,7 @@ class TestSimpleCliFunctions(unittest.TestCase):
         lines = rendered.splitlines()
         self.assertTrue(lines[0].startswith('job_id'))
         self.assertIn('run_host', lines[0])
+        self.assertIn('output', lines[0])
         self.assertIn('created_at', lines[0])
         self.assertIn('updated_at', lines[0])
         self.assertTrue(lines[2].startswith(row['job_id']))
@@ -148,6 +150,14 @@ class TestCliSubprocess(unittest.TestCase):
         done = self._run('done', '--job-id', job_id)
         self.assertEqual(done.returncode, 0)
         self.assertIn('marked as done', done.stdout)
+
+    def test_cli_add_stores_out_field(self):
+        self.assertEqual(self._run('init').returncode, 0)
+        added = self._run('add', '--case', 'c-out', '--inp', 'a.inp', '--bin', 'solver', '--status', 'start', '--out', 'results/c-out/*.vtk')
+        self.assertEqual(added.returncode, 0)
+        listed = self._run('list')
+        self.assertEqual(listed.returncode, 0)
+        self.assertIn("'output': 'results/c-out/*.vtk'", listed.stdout)
 
     def test_cli_rejects_ambiguous_case_done(self):
         self.assertEqual(self._run('init').returncode, 0)

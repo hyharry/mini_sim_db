@@ -31,6 +31,7 @@ CLI_FIELDS = [
     'bin',
     'inp',
     'input_files',
+    'output',
     JOB_ID_FIELD,
     'extra_params',
     'status',
@@ -40,7 +41,7 @@ CLI_FIELDS = [
     'run_host',
 ]
 PREFERRED_FIELD_ORDER = ['job_id', 'run_host', 'case', 'work_dir', 
-                         'bin', 'inp', 'input_files', 'extra_params', 
+                         'bin', 'inp', 'input_files', 'output', 'extra_params', 
                          'status', 'note', 'created_at', 'updated_at']
 
 
@@ -170,6 +171,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             bin TEXT NOT NULL DEFAULT '',
             inp TEXT NOT NULL DEFAULT '',
             input_files TEXT NOT NULL DEFAULT '',
+            output TEXT NOT NULL DEFAULT '',
             extra_params TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT '',
             note TEXT NOT NULL DEFAULT '',
@@ -179,6 +181,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         '''
     )
+    columns = {str(row[1]) for row in conn.execute('PRAGMA table_info(sim_cases)').fetchall()}
+    if 'output' not in columns:
+        conn.execute("ALTER TABLE sim_cases ADD COLUMN output TEXT NOT NULL DEFAULT ''")
+
     conn.execute(
         '''
         CREATE TABLE IF NOT EXISTS sim_case_extra (
@@ -219,8 +225,8 @@ def _import_csv_into_conn(conn: sqlite3.Connection, csv_path: Path) -> None:
             created_at = str(row.get('created_at') or updated_at)
             conn.execute(
                 '''
-                INSERT OR REPLACE INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, extra_params, status, note, created_at, updated_at, run_host)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, output, extra_params, status, note, created_at, updated_at, run_host)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     job_id,
@@ -229,6 +235,7 @@ def _import_csv_into_conn(conn: sqlite3.Connection, csv_path: Path) -> None:
                     str(row.get('bin', '')),
                     inp,
                     input_files,
+                    str(row.get('output', '')),
                     str(row.get('extra_params', '')),
                     str(row.get('status', '')),
                     note,
@@ -238,7 +245,7 @@ def _import_csv_into_conn(conn: sqlite3.Connection, csv_path: Path) -> None:
                 ),
             )
             for key, value in row.items():
-                if key in {'case', 'job_id', 'work_dir', 'bin', 'inp', 'input_files', 'extra_params', 'status', 'note', 'notes', 'state_changed_at', 'created_at', 'updated_at', 'run_host'}:
+                if key in {'case', 'job_id', 'work_dir', 'bin', 'inp', 'input_files', 'output', 'extra_params', 'status', 'note', 'notes', 'state_changed_at', 'created_at', 'updated_at', 'run_host'}:
                     continue
                 if value is not None and str(value) != '':
                     conn.execute('INSERT OR REPLACE INTO sim_case_extra(job_id, field, value) VALUES (?, ?, ?)', (job_id, key, str(value)))
@@ -305,7 +312,7 @@ def find_items(
     rows = list_view(db_path=db_path, status=None, run_host=None, sort_by='updated_at', desc=True, limit=None)
     out: list[dict[str, str]] = []
     for row in rows:
-        haystacks = [row.get('case', ''), row.get('work_dir', ''), row.get('inp', ''), row.get('input_files', ''), row.get('note', ''), row.get('bin', '')]
+        haystacks = [row.get('case', ''), row.get('work_dir', ''), row.get('inp', ''), row.get('input_files', ''), row.get('output', ''), row.get('note', ''), row.get('bin', '')]
         if text and not any(_matches_pattern(h, text) for h in haystacks):
             continue
         if case and not _matches_pattern(row.get('case', ''), case):
@@ -375,7 +382,7 @@ def init_sim_db(db_path: str = DEFAULT_DB_PATH) -> None:
     print(f'Initialized database: {sqlite_path}')
 
 
-def add_sim_item(case: str, inp: str | None, bin_name: str, status: str, db_path: str = DEFAULT_DB_PATH, notes: str = '', input_files: list[str] | None = None, note: str | None = None, work_dir: str | None = None, extra_params: str | None = None) -> None:
+def add_sim_item(case: str, inp: str | None, bin_name: str, status: str, db_path: str = DEFAULT_DB_PATH, notes: str = '', input_files: list[str] | None = None, note: str | None = None, work_dir: str | None = None, output: str | None = None, extra_params: str | None = None) -> None:
     status = _validate_status(status)
     conn, _ = _connect_db(db_path)
     try:
@@ -386,10 +393,10 @@ def add_sim_item(case: str, inp: str | None, bin_name: str, status: str, db_path
         job_id = derive_job_id(case=case, work_dir=resolved_work_dir, inp=primary_inp, input_files=files)
         conn.execute(
             '''
-            INSERT OR REPLACE INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, extra_params, status, note, created_at, updated_at, run_host)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, output, extra_params, status, note, created_at, updated_at, run_host)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
-            (job_id, case, resolved_work_dir, bin_name, primary_inp, _serialize_input_files(files), str(extra_params or ''), status, note_value, now, now, socket.gethostname()),
+            (job_id, case, resolved_work_dir, bin_name, primary_inp, _serialize_input_files(files), str(output or ''), str(extra_params or ''), status, note_value, now, now, socket.gethostname()),
         )
         conn.commit()
     finally:
@@ -403,7 +410,7 @@ def upd_case_by_job_id(db_path: str, job_id: str, fields: Mapping[str, Any]) -> 
         row = conn.execute('SELECT job_id FROM sim_cases WHERE job_id = ?', (job_id,)).fetchone()
         if row is None:
             raise ValueError(f"job_id not present in db: {job_id}")
-        mutable_base = {'work_dir', 'bin', 'inp', 'input_files', 'extra_params', 'status', 'note', 'created_at', 'updated_at', 'run_host'}
+        mutable_base = {'work_dir', 'bin', 'inp', 'input_files', 'output', 'extra_params', 'status', 'note', 'created_at', 'updated_at', 'run_host'}
         base_fields = {k: str(v) for k, v in fields.items() if k in mutable_base}
         extra_fields = {k: str(v) for k, v in fields.items() if k not in mutable_base and k not in {'case', 'job_id', 'notes', 'state_changed_at'}}
         if 'notes' in fields and 'note' not in base_fields:
@@ -487,13 +494,13 @@ def create_csv_db(fn_csv: str, dic: Mapping[str, Mapping[str, Any]]) -> None:
             job_id = str(detail.get('job_id') or derive_job_id(case=case, work_dir=work_dir or None, inp=inp or None, input_files=_parse_input_files(input_files)))
             conn.execute(
                 '''
-                INSERT INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, extra_params, status, note, created_at, updated_at, run_host)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, output, extra_params, status, note, created_at, updated_at, run_host)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
-                (job_id, case, work_dir, str(detail.get('bin', detail.get('exec_bin', ''))), inp, input_files, str(detail.get('extra_params', '')), str(detail.get('status', '')), str(detail.get('note', detail.get('notes', ''))), str(detail.get('created_at', now)), str(detail.get('updated_at', detail.get('state_changed_at', now))), str(detail.get('run_host', ''))),
+                (job_id, case, work_dir, str(detail.get('bin', detail.get('exec_bin', ''))), inp, input_files, str(detail.get('output', '')), str(detail.get('extra_params', '')), str(detail.get('status', '')), str(detail.get('note', detail.get('notes', ''))), str(detail.get('created_at', now)), str(detail.get('updated_at', detail.get('state_changed_at', now))), str(detail.get('run_host', ''))),
             )
             for k, v in detail.items():
-                if k in {'case', 'directory', 'exec_bin', 'work_dir', 'bin', 'inp', 'input_files', 'job_id', 'extra_params', 'status', 'note', 'notes', 'created_at', 'updated_at', 'state_changed_at', 'run_host'}:
+                if k in {'case', 'directory', 'exec_bin', 'work_dir', 'bin', 'inp', 'input_files', 'output', 'job_id', 'extra_params', 'status', 'note', 'notes', 'created_at', 'updated_at', 'state_changed_at', 'run_host'}:
                     continue
                 if v is not None and str(v) != '':
                     conn.execute('INSERT OR REPLACE INTO sim_case_extra(job_id, field, value) VALUES (?, ?, ?)', (job_id, str(k), str(v)))
@@ -513,6 +520,7 @@ def add_cases(fn_csv: str, sim_cases: Mapping[str, Mapping[str, Any]]) -> None:
             db_path=fn_csv,
             note=str(detail.get('note', detail.get('notes', ''))),
             work_dir=str(detail.get('work_dir', detail.get('directory', '')) or ''),
+            output=str(detail.get('output', '')),
             extra_params=str(detail.get('extra_params', '')),
         )
 
@@ -649,10 +657,10 @@ def sync_import(db_path: str, in_path: str) -> dict[str, Any]:
             if local is None:
                 base = {k: str(v) for k, v in raw.items()}
                 conn.execute(
-                    '''INSERT INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, extra_params, status, note, created_at, updated_at, run_host)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    '''INSERT INTO sim_cases(job_id, "case", work_dir, bin, inp, input_files, output, extra_params, status, note, created_at, updated_at, run_host)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                     (
-                        job_id, case, base.get('work_dir', ''), base.get('bin', ''), base.get('inp', ''), base.get('input_files', ''), base.get('extra_params', ''),
+                        job_id, case, base.get('work_dir', ''), base.get('bin', ''), base.get('inp', ''), base.get('input_files', ''), base.get('output', ''), base.get('extra_params', ''),
                         base.get('status', ''), base.get('note', ''), base.get('created_at', incoming_updated), incoming_updated, base.get('run_host', ''),
                     ),
                 )
@@ -1073,7 +1081,7 @@ def sync_pull(db_path: str, remote: str) -> dict[str, Any]:
 
 
 def _format_table(rows: list[dict[str, str]]) -> str:
-    cols = ['job_id', 'run_host', 'case', 'work_dir', 'bin', 'inp', 'input_files', 'extra_params', 'status', 'note', 'created_at', 'updated_at']
+    cols = ['job_id', 'run_host', 'case', 'work_dir', 'bin', 'inp', 'input_files', 'output', 'extra_params', 'status', 'note', 'created_at', 'updated_at']
     formatted_rows: list[dict[str, str]] = []
     for row in rows:
         formatted = dict(row)
@@ -1128,6 +1136,7 @@ def _build_cli() -> argparse.ArgumentParser:
     p_add.add_argument('--work-dir', '--wd', dest='work_dir', default=None, help='Working directory for this job. Defaults to current directory.')
     p_add.add_argument('--extra-param', action='append', default=[], help='Extra runtime parameter in key=value form. Repeatable.')
     p_add.add_argument('--extra-params', default=None, help='Raw extra runtime parameters string, for example JSON.')
+    p_add.add_argument('--out', dest='output', default='', help='Optional output/result files info for this job (e.g. result paths).')
     p_add.add_argument('--status', required=True, help='Initial status. Allowed: start, restart, done.')
     p_add.add_argument('--note', default='', help='Optional short note for the job.')
     p_add.add_argument('--notes', dest='note', help='Deprecated alias of --note kept for compatibility.')
@@ -1223,7 +1232,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == 'init':
             init_sim_db(args.db)
         elif args.command == 'add':
-            add_sim_item(case=args.case, inp=args.inp, input_files=args.input_file, bin_name=args.bin_name, status=args.status, db_path=args.db, note=args.note, work_dir=args.work_dir, extra_params=_normalize_extra_params(args.extra_params, args.extra_param))
+            add_sim_item(case=args.case, inp=args.inp, input_files=args.input_file, bin_name=args.bin_name, status=args.status, db_path=args.db, note=args.note, work_dir=args.work_dir, output=args.output, extra_params=_normalize_extra_params(args.extra_params, args.extra_param))
         elif args.command == 'done':
             _, rows = _read_sim_db(args.db)
             target_job_id = resolve_job_id(rows, case=args.case, job_id=args.job_id)

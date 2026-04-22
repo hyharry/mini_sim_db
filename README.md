@@ -19,7 +19,8 @@ Core storage is SQLite via `sim_db.py`.
   --case wing_load \
   --inp wing_load.inp \
   --bin solver \
-  --status start
+  --status start \
+  --out results/wing_load/*.vtk
 
 ./sim_db list --table
 ./sim_db done --job-id <job_id>
@@ -41,6 +42,7 @@ Core storage is SQLite via `sim_db.py`.
 - prefer `--job-id` for updates
 - if multiple rows share the same `case`, `--case` updates can be ambiguous
 - sync merge key is `job_id`
+- optional `--out` stores output/result-file info in the `output` column
 - newer `updated_at` wins during sync
 
 ## Tests
